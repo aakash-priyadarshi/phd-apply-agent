@@ -1,14 +1,12 @@
 #!/usr/bin/env python3
 """
-PhD Outreach Automation - Optimized 2-Stage System (Windows 11)
+PhD Outreach Automation - Optimized 2-Stage System (No WebDriver)
 Stage 1: Extract & Match (gpt-4o-mini) - Cost-effective professor discovery
 Stage 2: Email Drafting (gpt-4) - High-quality personalized emails
 """
 
 import streamlit as st
 import pandas as pd
-import asyncio
-import aiohttp
 import logging
 from datetime import datetime, timedelta
 import json
@@ -23,24 +21,13 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 import queue
 
-# no web driver
-
+# Web scraping imports (NO SELENIUM)
 import requests
 from bs4 import BeautifulSoup
 import re
 
-#
-
 # Third-party imports
 import openai
-from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-import requests
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
@@ -52,22 +39,30 @@ from email import encoders
 import pickle
 import PyPDF2
 from io import BytesIO
-from webdriver_manager.chrome import ChromeDriverManager
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
 
-# Configure logging
+# Configure logging with UTF-8 encoding to handle emojis
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('phd_outreach.log'),
+        logging.FileHandler('phd_outreach.log', encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Remove emojis from log messages for Windows compatibility
+
+
+def clean_log_message(message: str) -> str:
+    """Remove emojis from log messages to prevent encoding errors."""
+    import re
+    # Remove emojis and other Unicode symbols that cause Windows logging issues
+    return re.sub(r'[^\x00-\x7F]+', '', message).strip()
 
 
 @dataclass
@@ -101,13 +96,21 @@ class University:
     departments: str
     priority: str
     notes: str
-    # pending, researching, stage1_complete, stage2_complete, completed
     status: str = "pending"
     professors_found: int = 0
     professors_processed: int = 0
     total_stage1_cost: float = 0.0
     total_stage2_cost: float = 0.0
     last_scraped: str = ""
+
+
+def safe_operation(func, *args, **kwargs):
+    """Safe wrapper for operations that might fail."""
+    try:
+        return func(*args, **kwargs)
+    except Exception as e:
+        logger.error(f"Safe operation failed: {e}")
+        return None
 
 
 class APIManager:
@@ -449,72 +452,49 @@ class DatabaseManager:
         }
 
 
-class OptimizedWebScraper:
-    """Optimized web scraper for Windows 11 with cost-conscious extraction."""
+class NoWebDriverScraper:
+    """Pure HTTP scraper using requests + BeautifulSoup (NO SELENIUM)."""
 
     def __init__(self, api_manager: APIManager):
         self.api_manager = api_manager
-        self.driver = None
-        self.setup_driver()
+        self.session = requests.Session()
 
-    def setup_driver(self):
-        """Setup Chrome WebDriver with fixed driver path."""
-        chrome_options = Options()
-        chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--window-size=1920,1080")
-        chrome_options.add_argument("--timeout=20000")
-        chrome_options.add_argument("--page-load-strategy=eager")
-
-        try:
-            # Use the fixed ChromeDriver path
-            fixed_driver_path = os.path.join(
-                os.getcwd(), "chromedriver_fixed", "chromedriver.exe")
-
-            if os.path.exists(fixed_driver_path):
-                service = Service(fixed_driver_path)
-                logger.info(f"Using fixed ChromeDriver: {fixed_driver_path}")
-            else:
-                # Fallback to webdriver-manager
-                from webdriver_manager.chrome import ChromeDriverManager
-                service = Service(ChromeDriverManager().install())
-                logger.info("Using webdriver-manager fallback")
-
-            self.driver = webdriver.Chrome(
-                service=service, options=chrome_options)
-            self.driver.set_page_load_timeout(20)
-            self.driver.implicitly_wait(5)
-
-            logger.info("Chrome WebDriver initialized successfully")
-
-        except Exception as e:
-            logger.error(f"Chrome driver setup failed: {e}")
-            self.driver = None
+        # Set up headers to mimic a real browser
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+        })
 
     def scrape_university_faculty_sync(self, university: str, departments: List[str],
                                        user_research_profile: str) -> List[Professor]:
-        """Scrape university faculty using 2-stage approach - Sync version."""
+        """Scrape university faculty using pure HTTP requests."""
         professors = []
-
-        if not self.driver:
-            logger.error("WebDriver not available")
-            return professors
+        logger.info(f"Starting scrape for {university}")
 
         try:
             for dept in departments:
                 # Find faculty pages
                 faculty_pages = self.find_faculty_pages_sync(university, dept)
+                logger.info(
+                    f"Found {len(faculty_pages)} faculty pages for {dept}")
 
                 # Limit to top 2 pages per department to control costs
                 for page_url in faculty_pages[:2]:
                     try:
-                        # Get page content
-                        self.driver.get(page_url)
-                        time.sleep(3)
+                        # Get page content using requests
+                        response = self.session.get(page_url, timeout=20)
+                        response.raise_for_status()
 
-                        page_content = self.driver.page_source
+                        # Parse with BeautifulSoup
+                        soup = BeautifulSoup(response.content, 'html.parser')
+                        page_content = soup.get_text()
+
+                        logger.info(
+                            f"Scraped content from {page_url} - {len(page_content)} chars")
 
                         # Stage 1: Extract and match professors (cost-effective)
                         stage1_result = self.api_manager.stage1_extract_and_match_sync(
@@ -540,73 +520,297 @@ class OptimizedWebScraper:
                                         "alignment_score", 0) >= 6.0 else "pending",
                                     created_at=datetime.now().isoformat(),
                                     last_verified=datetime.now().isoformat(),
-                                    stage1_cost=stage1_result["cost"] /
-                                    len(stage1_result["professors"]
-                                        ) if stage1_result["professors"] else 0
+                                    stage1_cost=stage1_result["cost"] / len(
+                                        stage1_result["professors"]) if stage1_result["professors"] else 0
                                 )
                                 professors.append(professor)
+
+                            logger.info(
+                                f"Stage 1 success: {len(stage1_result['professors'])} professors extracted")
+                        else:
+                            logger.warning(
+                                f"Stage 1 failed: {stage1_result.get('error')}")
 
                         # Rate limiting
                         time.sleep(2)
 
+                    except requests.RequestException as e:
+                        logger.error(f"HTTP error scraping {page_url}: {e}")
+                        continue
                     except Exception as e:
-                        logger.error(f"Error scraping {page_url}: {e}")
+                        logger.error(f"Error processing {page_url}: {e}")
                         continue
 
         except Exception as e:
             logger.error(f"Error scraping {university}: {e}")
 
+        logger.info(
+            f"Completed scrape for {university}: {len(professors)} professors found")
         return professors
 
     def find_faculty_pages_sync(self, university: str, department: str) -> List[str]:
-        """Find faculty pages for a university department - Sync version."""
+        """Find faculty pages using Google Search (API or headless browsing)."""
         faculty_urls = []
 
         try:
-            # Search for faculty pages
-            search_terms = [
-                f"{university} {department} faculty",
-                f"{university} {department} professors",
-                f"{university} {department} people"
-            ]
+            # Option 1: Try Google Custom Search API first (if configured)
+            faculty_urls = self.google_search_api(university, department)
 
-            for search_term in search_terms:
-                try:
-                    # Use Google search to find faculty pages
-                    search_url = f"https://www.google.com/search?q={search_term.replace(' ', '+')}"
+            # Option 2: Fallback to headless Google search if API not available
+            if not faculty_urls:
+                faculty_urls = self.google_search_headless(
+                    university, department)
 
-                    self.driver.get(search_url)
-                    time.sleep(2)
-
-                    # Extract search result links
-                    links = self.driver.find_elements(
-                        By.CSS_SELECTOR, "a[href]")
-
-                    for link in links[:5]:  # Top 5 results
-                        try:
-                            href = link.get_attribute("href")
-                            if href and any(term in href.lower() for term in ["faculty", "people", "staff"]):
-                                if university.lower().replace(" ", "") in href.lower():
-                                    faculty_urls.append(href)
-                        except:
-                            continue
-
-                    if faculty_urls:
-                        break  # Found pages, no need to continue searching
-
-                except Exception as e:
-                    logger.debug(f"Search error for {search_term}: {e}")
-                    continue
+            # Option 3: Fallback to direct university URLs if search fails
+            if not faculty_urls:
+                faculty_urls = self.direct_university_urls(
+                    university, department)
 
         except Exception as e:
             logger.error(f"Error finding faculty pages: {e}")
 
+        logger.info(
+            f"Found {len(faculty_urls)} faculty pages for {university} {department}")
+        return faculty_urls
+
+    def google_search_api(self, university: str, department: str) -> List[str]:
+        """Use Google Custom Search API for finding faculty pages."""
+        faculty_urls = []
+
+        try:
+            # Check if Google Custom Search is configured
+            google_api_key = os.getenv('GOOGLE_API_KEY')
+            # Use your CSE ID as default
+            google_cse_id = os.getenv('GOOGLE_CSE_ID', '2557e384b0f844ef9')
+
+            if not google_api_key:
+                logger.info(
+                    "Google Custom Search API key not found, trying headless browsing...")
+                return faculty_urls
+
+            from googleapiclient.discovery import build
+
+            # Build the service
+            service = build("customsearch", "v1", developerKey=google_api_key)
+
+            # Search terms optimized for faculty discovery
+            search_queries = [
+                f'"{university}" {department} faculty directory site:edu',
+                f'"{university}" {department} professors site:edu',
+                f'"{university}" {department} people faculty site:edu'
+            ]
+
+            for query in search_queries:
+                try:
+                    logger.info(f"Google API search: {query}")
+
+                    # Execute the search
+                    result = service.cse().list(
+                        q=query,
+                        cx=google_cse_id,
+                        num=10
+                    ).execute()
+
+                    # Extract URLs from results
+                    if 'items' in result:
+                        for item in result['items']:
+                            url = item['link']
+                            title = item.get('title', '')
+
+                            logger.info(f"Found result: {title} - {url}")
+
+                            # Filter for faculty-related URLs
+                            if any(keyword in url.lower() for keyword in ['faculty', 'people', 'staff', 'directory', 'professors']):
+                                # Verify it's from the university domain
+                                if self.is_university_domain(url, university):
+                                    faculty_urls.append(url)
+                                    logger.info(f"Added faculty URL: {url}")
+
+                    if faculty_urls:
+                        break  # Found results, no need to continue
+
+                    time.sleep(0.1)  # Small delay between API calls
+
+                except Exception as e:
+                    logger.debug(f"Google API search error for {query}: {e}")
+                    continue
+
+        except Exception as e:
+            logger.debug(f"Google Custom Search API error: {e}")
+
+        logger.info(f"Google API found {len(faculty_urls)} URLs")
         return list(set(faculty_urls))  # Remove duplicates
 
-    def close_driver(self):
-        """Close the WebDriver."""
-        if self.driver:
-            self.driver.quit()
+    def google_search_headless(self, university: str, department: str) -> List[str]:
+        """Use headless browsing for Google Search (cost-free alternative)."""
+        faculty_urls = []
+
+        try:
+            # Import selenium only if needed
+            from selenium import webdriver
+            from selenium.webdriver.common.by import By
+            from selenium.webdriver.chrome.options import Options
+            from selenium.webdriver.chrome.service import Service
+            from webdriver_manager.chrome import ChromeDriverManager
+
+            # Setup headless Chrome
+            chrome_options = Options()
+            chrome_options.add_argument("--headless")
+            chrome_options.add_argument("--no-sandbox")
+            chrome_options.add_argument("--disable-dev-shm-usage")
+            chrome_options.add_argument("--disable-gpu")
+            chrome_options.add_argument("--window-size=1920,1080")
+            chrome_options.add_argument(
+                "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+
+            # Create driver
+            service = Service(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=chrome_options)
+
+            try:
+                # Search terms for Google
+                search_queries = [
+                    f'"{university}" {department} faculty directory site:edu',
+                    f'"{university}" {department} professors site:edu'
+                ]
+
+                for query in search_queries:
+                    try:
+                        # Navigate to Google
+                        google_url = f"https://www.google.com/search?q={query.replace(' ', '+')}"
+                        driver.get(google_url)
+                        time.sleep(2)
+
+                        # Find search result links
+                        search_results = driver.find_elements(
+                            By.CSS_SELECTOR, "a[href]")
+
+                        for result in search_results[:15]:  # Top 15 results
+                            try:
+                                href = result.get_attribute("href")
+                                if href and href.startswith("http"):
+                                    # Filter for faculty pages
+                                    if any(keyword in href.lower() for keyword in ['faculty', 'people', 'staff', 'directory', 'professors']):
+                                        # Verify university domain
+                                        if self.is_university_domain(href, university):
+                                            faculty_urls.append(href)
+                            except:
+                                continue
+
+                        if faculty_urls:
+                            break  # Found results
+
+                        time.sleep(1)
+
+                    except Exception as e:
+                        logger.debug(
+                            f"Google headless search error for {query}: {e}")
+                        continue
+
+            finally:
+                driver.quit()
+
+        except ImportError:
+            logger.info(
+                "Selenium not available for headless browsing, using direct URLs...")
+        except Exception as e:
+            logger.debug(f"Headless Google search error: {e}")
+
+        return list(set(faculty_urls))
+
+    def is_university_domain(self, url: str, university: str) -> bool:
+        """Check if URL belongs to the university domain."""
+        try:
+            from urllib.parse import urlparse
+            domain = urlparse(url).netloc.lower()
+
+            # University domain mappings
+            university_domains = {
+                "Massachusetts Institute of Technology": ["mit.edu"],
+                "Stanford University": ["stanford.edu"],
+                "University of Oxford": ["ox.ac.uk", "oxford.ac.uk"],
+                "University of Cambridge": ["cam.ac.uk", "cambridge.ac.uk"],
+                "Carnegie Mellon University": ["cmu.edu"],
+                "UC Berkeley": ["berkeley.edu"],
+                "ETH Zurich": ["ethz.ch"],
+                "University of Toronto": ["utoronto.ca"]
+            }
+
+            allowed_domains = university_domains.get(university, [])
+            if not allowed_domains:
+                # Fallback: extract domain from university name
+                university_clean = university.lower().replace(" ", "").replace(
+                    "university", "").replace("institute", "").replace("technology", "")
+                return university_clean in domain
+
+            return any(allowed_domain in domain for allowed_domain in allowed_domains)
+
+        except Exception:
+            return False
+
+    def direct_university_urls(self, university: str, department: str) -> List[str]:
+        """Fallback to direct university URLs when search fails."""
+        faculty_urls = []
+
+        # University-specific faculty page mappings (your existing code)
+        university_mappings = {
+            "Massachusetts Institute of Technology": {
+                "cs_urls": ["https://www.eecs.mit.edu/people/faculty", "https://www.csail.mit.edu/people"],
+                "ece_urls": ["https://www.eecs.mit.edu/people/faculty"],
+                "robotics_urls": ["https://www.csail.mit.edu/research/robotics"],
+                "bioe_urls": ["https://be.mit.edu/directory/faculty"]
+            },
+            "Stanford University": {
+                "cs_urls": ["https://cs.stanford.edu/people/faculty"],
+                "robotics_urls": ["https://ai.stanford.edu/people/"],
+                "hci_urls": ["https://hci.stanford.edu/people/"]
+            },
+            "University of Oxford": {
+                "cs_urls": ["https://www.cs.ox.ac.uk/people/faculty.html"],
+                "stats_urls": ["https://www.stats.ox.ac.uk/people/"],
+                "engineering_urls": ["https://eng.ox.ac.uk/people/"]
+            },
+            "University of Cambridge": {
+                "cs_urls": ["https://www.cst.cam.ac.uk/people/academic-staff"],
+                "engineering_urls": ["https://www.eng.cam.ac.uk/profiles/"]
+            },
+            "Carnegie Mellon University": {
+                "cs_urls": ["https://www.cs.cmu.edu/directory/faculty"],
+                "robotics_urls": ["https://www.ri.cmu.edu/faculty/"],
+                "ml_urls": ["https://www.ml.cmu.edu/people/faculty.html"]
+            },
+            "UC Berkeley": {
+                "eecs_urls": ["https://eecs.berkeley.edu/faculty"],
+                "cs_urls": ["https://eecs.berkeley.edu/faculty"]
+            },
+            "ETH Zurich": {
+                "cs_urls": ["https://inf.ethz.ch/people/faculty.html"]
+            },
+            "University of Toronto": {
+                "cs_urls": ["https://web.cs.toronto.edu/people/faculty"],
+                "engineering_urls": ["https://www.engineering.utoronto.ca/faculty-staff/"]
+            }
+        }
+
+        university_info = university_mappings.get(university, {})
+        dept_lower = department.lower()
+        dept_urls = university_info.get(f"{dept_lower}_urls", [])
+
+        # Test each URL
+        for url in dept_urls[:2]:  # Limit to top 2
+            try:
+                response = self.session.get(url, timeout=10)
+                if response.status_code == 200:
+                    faculty_urls.append(url)
+            except:
+                continue
+
+        return faculty_urls
+
+    def close_session(self):
+        """Close the requests session."""
+        if self.session:
+            self.session.close()
 
 
 class ResearchOrchestrator:
@@ -634,6 +838,8 @@ class ResearchOrchestrator:
         self.progress_messages.append(formatted_message)
         if len(self.progress_messages) > 20:
             self.progress_messages = self.progress_messages[-20:]
+        # Log without emojis to prevent encoding errors
+        logger.info(clean_log_message(message))
 
     def run_stage1_research_sync(self, universities: List[University], user_research_profile: str):
         """Run Stage 1: Extract and match professors (cost-effective) - Sync version."""
@@ -658,17 +864,17 @@ class ResearchOrchestrator:
                 # Save professors to database
                 professor_ids = []
                 for professor in professors:
-                    prof_id = self.db.add_professor(professor)
-                    professor_ids.append(prof_id)
+                    prof_id = safe_operation(self.db.add_professor, professor)
+                    if prof_id:
+                        professor_ids.append(prof_id)
 
                 # Update cost tracking
                 stage1_cost = sum(p.stage1_cost for p in professors)
-                self.db.update_cost_tracking(
-                    stage1_cost, 0.0, len(professors), 0)
+                safe_operation(self.db.update_cost_tracking,
+                               stage1_cost, 0.0, len(professors), 0)
 
                 self.add_progress_message(
-                    f"✅ Stage 1 Complete: {university.name} - {len(professors)} professors found "
-                    f"(Cost: ${stage1_cost:.4f})"
+                    f"✅ Stage 1 Complete: {university.name} - {len(professors)} professors found (Cost: ${stage1_cost:.4f})"
                 )
 
                 time.sleep(3)  # Rate limiting between universities
@@ -677,6 +883,7 @@ class ResearchOrchestrator:
             logger.error(f"Stage 1 error: {e}")
             self.add_progress_message(f"❌ Stage 1 error: {e}")
         finally:
+            self.is_running = False
             self.add_progress_message(
                 "✅ Stage 1 Complete: Professor discovery finished!")
 
@@ -756,12 +963,11 @@ class ResearchOrchestrator:
                 time.sleep(1)  # Rate limiting
 
             # Update cost tracking
-            self.db.update_cost_tracking(
-                0.0, total_stage2_cost, 0, emails_generated)
+            safe_operation(self.db.update_cost_tracking, 0.0,
+                           total_stage2_cost, 0, emails_generated)
 
             self.add_progress_message(
-                f"✅ Stage 2 Complete: {emails_generated} emails generated "
-                f"(Total cost: ${total_stage2_cost:.4f})"
+                f"✅ Stage 2 Complete: {emails_generated} emails generated (Total cost: ${total_stage2_cost:.4f})"
             )
 
         except Exception as e:
@@ -827,7 +1033,7 @@ class ResearchOrchestrator:
         """Stop the research pipeline."""
         self.is_running = False
         if self.web_scraper:
-            self.web_scraper.close_driver()
+            self.web_scraper.close_session()
 
 
 # Synchronous wrapper functions for Streamlit compatibility
@@ -879,6 +1085,7 @@ def main():
         border-radius: 5px;
         margin: 0.5rem 0;
         border-left: 3px solid #2196f3;
+        color: #1565c0 !important;
     }
     .progress-message {
         background: #f8f9fa;
@@ -887,7 +1094,18 @@ def main():
         margin: 0.2rem 0;
         font-family: monospace;
         font-size: 0.8rem;
+        color: #333 !important;
+        border: 1px solid #dee2e6;
     }
+    .professor-status {
+        padding: 0.2rem 0.5rem;
+        border-radius: 15px;
+        font-size: 0.8rem;
+        font-weight: bold;
+    }
+    .status-verified { background: #d4edda; color: #155724; }
+    .status-email-drafted { background: #d1ecf1; color: #0c5460; }
+    .status-pending { background: #fff3cd; color: #856404; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -1002,6 +1220,46 @@ def main():
                     except Exception as e:
                         st.error(f"Error analyzing CV: {e}")
 
+        # Google Custom Search API (using your existing setup)
+        st.markdown("---")
+        st.header("🔍 Google Search Configuration")
+
+        st.info("🎯 **Your Custom Search Engine ID**: `2557e384b0f844ef9` (detected)")
+
+        google_api_key = st.text_input(
+            "Google API Key", type="password", value=os.getenv('GOOGLE_API_KEY', ''),
+            help="Get API key from Google Cloud Console > APIs & Services > Credentials (same project as your Gmail credentials)")
+
+        if google_api_key:
+            st.success("✅ Google Custom Search API configured!")
+            st.caption(
+                "Will use Google Search API for better faculty discovery")
+            # Auto-save to environment for this session
+            os.environ['GOOGLE_API_KEY'] = google_api_key
+            os.environ['GOOGLE_CSE_ID'] = '2557e384b0f844ef9'
+        else:
+            st.warning(
+                "⚡ Add your Google API Key to enable powerful Google Search")
+            with st.expander("📖 How to get Google API Key (2 minutes)"):
+                st.markdown("""
+                **Quick Setup - Same Project as Gmail:**
+                
+                1. **Go to Google Cloud Console**: [console.cloud.google.com](https://console.cloud.google.com/)
+                2. **Select your project**: `jarvis-383903` (same as Gmail)
+                3. **Enable API**: 
+                   - Go to "APIs & Services" > "Library"
+                   - Search for "Custom Search API"
+                   - Click "Enable"
+                4. **Create API Key**:
+                   - Go to "APIs & Services" > "Credentials" 
+                   - Click "+ CREATE CREDENTIALS" > "API Key"
+                   - Copy the API key
+                5. **Paste it above** ⬆️
+                
+                **Cost**: ~$5 per 1,000 searches (very affordable)
+                **Alternative**: Leave blank to use free headless browsing (slower)
+                """)
+
         # User settings
         st.markdown("---")
         st.header("👤 User Settings")
@@ -1043,7 +1301,7 @@ def main():
                                 df_targets = df_targets.drop(idx)
                                 df_targets.to_csv(
                                     "PhD_Targets.csv", index=False)
-                                st.experimental_rerun()
+                                st.rerun()
 
                         if include:
                             universities_to_research.append(University(
@@ -1088,7 +1346,7 @@ def main():
 
                         df_targets.to_csv("PhD_Targets.csv", index=False)
                         st.success("✅ University added!")
-                        st.experimental_rerun()
+                        st.rerun()
                     except Exception as e:
                         st.error(f"Error adding university: {e}")
                 else:
@@ -1102,7 +1360,7 @@ def main():
 
             # Stage indicators
             st.markdown(
-                '<div class="stage-indicator"><strong>Stage 1:</strong> Professor Discovery & Matching (gpt-4o-mini - Cost Effective)</div>',
+                '<div class="stage-indicator"><strong>Stage 1:</strong> Professor Discovery &amp; Matching (gpt-4o-mini - Cost Effective)</div>',
                 unsafe_allow_html=True)
             st.markdown(
                 '<div class="stage-indicator"><strong>Stage 2:</strong> Personalized Email Generation (gpt-4 - High Quality)</div>',
@@ -1119,7 +1377,7 @@ def main():
                                 run_stage1_sync(
                                     universities_to_research, st.session_state.research_profile, st.session_state.orchestrator)
                                 st.success("✅ Stage 1 completed!")
-                                st.experimental_rerun()
+                                st.rerun()
                             except Exception as e:
                                 st.error(f"❌ Stage 1 failed: {e}")
                                 logger.error(f"Stage 1 error: {e}")
@@ -1134,7 +1392,7 @@ def main():
                                 run_stage2_sync(
                                     st.session_state.research_profile, user_name, st.session_state.orchestrator)
                                 st.success("✅ Stage 2 completed!")
-                                st.experimental_rerun()
+                                st.rerun()
                             except Exception as e:
                                 st.error(f"❌ Stage 2 failed: {e}")
                                 logger.error(f"Stage 2 error: {e}")
@@ -1185,10 +1443,17 @@ def main():
                     for idx, prof in professors_df.iterrows():
                         alignment_color = "🟢" if prof['alignment_score'] >= 8 else "🟡" if prof['alignment_score'] >= 6 else "🔴"
 
+                        # Status badge
+                        status_class = f"status-{prof['status'].replace('_', '-')}"
+                        status_display = prof['status'].replace(
+                            '_', ' ').title()
+
                         with st.expander(f"{alignment_color} {prof['name']} - {prof['university']} (Score: {prof['alignment_score']:.1f})"):
                             col_info, col_actions = st.columns([2, 1])
 
                             with col_info:
+                                st.markdown(
+                                    f'<span class="professor-status {status_class}">{status_display}</span>', unsafe_allow_html=True)
                                 st.write(
                                     f"**Department:** {prof['department']}")
                                 st.write(f"**Email:** {prof['email']}")
@@ -1202,7 +1467,6 @@ def main():
                                 if prof['profile_url']:
                                     st.write(
                                         f"**Profile:** [{prof['profile_url']}]({prof['profile_url']})")
-                                st.write(f"**Status:** {prof['status']}")
                                 st.write(
                                     f"**Costs:** Stage 1: ${prof['stage1_cost']:.4f}, Stage 2: ${prof['stage2_cost']:.4f}")
 
@@ -1230,7 +1494,7 @@ def main():
                                                     if success:
                                                         st.success(
                                                             "✅ Email generated!")
-                                                        st.experimental_rerun()
+                                                        st.rerun()
                                                     else:
                                                         st.error(
                                                             "❌ Failed to generate email")
@@ -1265,7 +1529,7 @@ def main():
                                             "DELETE FROM professors WHERE id = ?", (prof['id'],))
                                         conn.commit()
                                         conn.close()
-                                        st.experimental_rerun()
+                                        st.rerun()
                                     except Exception as e:
                                         st.error(
                                             f"Error deleting professor: {e}")
