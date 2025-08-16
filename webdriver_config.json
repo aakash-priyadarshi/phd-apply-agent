@@ -1,0 +1,17 @@
+{
+  "driver_path": "C:\\Users\\aakas\\OneDrive\\github\\phd-apply-agent\\chromedriver_fixed\\chromedriver.exe",
+  "chrome_options": [
+    "--headless",
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--window-size=1920,1080",
+    "--timeout=20000",
+    "--page-load-strategy=eager"
+  ],
+  "timeouts": {
+    "page_load": 20,
+    "implicit_wait": 5,
+    "script_timeout": 15
+  }
+}

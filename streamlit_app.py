@@ -23,6 +23,14 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 import queue
 
+# no web driver
+
+import requests
+from bs4 import BeautifulSoup
+import re
+
+#
+
 # Third-party imports
 import openai
 from bs4 import BeautifulSoup
@@ -126,8 +134,8 @@ class APIManager:
         output_cost = (output_tokens / 1000) * self.pricing[model]["output"]
         return input_cost + output_cost
 
-    async def stage1_extract_and_match(self, page_content: str, user_research_profile: str) -> Dict[str, Any]:
-        """Stage 1: Extract professor info and match with user research (gpt-4o-mini)."""
+    def stage1_extract_and_match_sync(self, page_content: str, user_research_profile: str) -> Dict[str, Any]:
+        """Stage 1: Extract professor info and match with user research (gpt-4o-mini) - Sync version."""
         prompt = f"""
         Extract professor information from this faculty page content and match with user's research profile.
         
@@ -159,8 +167,7 @@ class APIManager:
         """
 
         try:
-            response = await asyncio.to_thread(
-                self.client.chat.completions.create,
+            response = self.client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3,
@@ -198,9 +205,9 @@ class APIManager:
             logger.error(f"Stage 1 API error: {e}")
             return {"professors": [], "cost": 0, "success": False, "error": str(e)}
 
-    async def stage2_draft_email(self, professor: Professor, user_research_profile: str,
-                                 user_name: str) -> Dict[str, Any]:
-        """Stage 2: Draft personalized email (gpt-4)."""
+    def stage2_draft_email_sync(self, professor: Professor, user_research_profile: str,
+                                user_name: str) -> Dict[str, Any]:
+        """Stage 2: Draft personalized email (gpt-4) - Sync version."""
         prompt = f"""
         Write a professional, personalized PhD application email for this professor.
         
@@ -236,8 +243,7 @@ class APIManager:
         """
 
         try:
-            response = await asyncio.to_thread(
-                self.client.chat.completions.create,
+            response = self.client.chat.completions.create(
                 model="gpt-4",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.7,
@@ -452,29 +458,44 @@ class OptimizedWebScraper:
         self.setup_driver()
 
     def setup_driver(self):
-        """Setup Chrome WebDriver for Windows 11."""
+        """Setup Chrome WebDriver with fixed driver path."""
         chrome_options = Options()
         chrome_options.add_argument("--headless")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--window-size=1920,1080")
-        chrome_options.add_argument(
-            "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        chrome_options.add_argument("--timeout=20000")
+        chrome_options.add_argument("--page-load-strategy=eager")
 
         try:
-            # Use webdriver-manager for automatic ChromeDriver management
-            service = Service(ChromeDriverManager().install())
+            # Use the fixed ChromeDriver path
+            fixed_driver_path = os.path.join(
+                os.getcwd(), "chromedriver_fixed", "chromedriver.exe")
+
+            if os.path.exists(fixed_driver_path):
+                service = Service(fixed_driver_path)
+                logger.info(f"Using fixed ChromeDriver: {fixed_driver_path}")
+            else:
+                # Fallback to webdriver-manager
+                from webdriver_manager.chrome import ChromeDriverManager
+                service = Service(ChromeDriverManager().install())
+                logger.info("Using webdriver-manager fallback")
+
             self.driver = webdriver.Chrome(
                 service=service, options=chrome_options)
+            self.driver.set_page_load_timeout(20)
+            self.driver.implicitly_wait(5)
+
             logger.info("Chrome WebDriver initialized successfully")
+
         except Exception as e:
             logger.error(f"Chrome driver setup failed: {e}")
             self.driver = None
 
-    async def scrape_university_faculty(self, university: str, departments: List[str],
-                                        user_research_profile: str) -> List[Professor]:
-        """Scrape university faculty using 2-stage approach."""
+    def scrape_university_faculty_sync(self, university: str, departments: List[str],
+                                       user_research_profile: str) -> List[Professor]:
+        """Scrape university faculty using 2-stage approach - Sync version."""
         professors = []
 
         if not self.driver:
@@ -484,19 +505,19 @@ class OptimizedWebScraper:
         try:
             for dept in departments:
                 # Find faculty pages
-                faculty_pages = await self.find_faculty_pages(university, dept)
+                faculty_pages = self.find_faculty_pages_sync(university, dept)
 
-                # Limit to top 3 pages per department
-                for page_url in faculty_pages[:3]:
+                # Limit to top 2 pages per department to control costs
+                for page_url in faculty_pages[:2]:
                     try:
                         # Get page content
                         self.driver.get(page_url)
-                        await asyncio.sleep(3)
+                        time.sleep(3)
 
                         page_content = self.driver.page_source
 
                         # Stage 1: Extract and match professors (cost-effective)
-                        stage1_result = await self.api_manager.stage1_extract_and_match(
+                        stage1_result = self.api_manager.stage1_extract_and_match_sync(
                             page_content, user_research_profile
                         )
 
@@ -520,12 +541,13 @@ class OptimizedWebScraper:
                                     created_at=datetime.now().isoformat(),
                                     last_verified=datetime.now().isoformat(),
                                     stage1_cost=stage1_result["cost"] /
-                                    len(stage1_result["professors"])
+                                    len(stage1_result["professors"]
+                                        ) if stage1_result["professors"] else 0
                                 )
                                 professors.append(professor)
 
                         # Rate limiting
-                        await asyncio.sleep(2)
+                        time.sleep(2)
 
                     except Exception as e:
                         logger.error(f"Error scraping {page_url}: {e}")
@@ -536,8 +558,8 @@ class OptimizedWebScraper:
 
         return professors
 
-    async def find_faculty_pages(self, university: str, department: str) -> List[str]:
-        """Find faculty pages for a university department."""
+    def find_faculty_pages_sync(self, university: str, department: str) -> List[str]:
+        """Find faculty pages for a university department - Sync version."""
         faculty_urls = []
 
         try:
@@ -554,17 +576,20 @@ class OptimizedWebScraper:
                     search_url = f"https://www.google.com/search?q={search_term.replace(' ', '+')}"
 
                     self.driver.get(search_url)
-                    await asyncio.sleep(2)
+                    time.sleep(2)
 
                     # Extract search result links
                     links = self.driver.find_elements(
                         By.CSS_SELECTOR, "a[href]")
 
                     for link in links[:5]:  # Top 5 results
-                        href = link.get_attribute("href")
-                        if href and any(term in href.lower() for term in ["faculty", "people", "staff"]):
-                            if university.lower().replace(" ", "") in href.lower():
-                                faculty_urls.append(href)
+                        try:
+                            href = link.get_attribute("href")
+                            if href and any(term in href.lower() for term in ["faculty", "people", "staff"]):
+                                if university.lower().replace(" ", "") in href.lower():
+                                    faculty_urls.append(href)
+                        except:
+                            continue
 
                     if faculty_urls:
                         break  # Found pages, no need to continue searching
@@ -589,7 +614,7 @@ class ResearchOrchestrator:
 
     def __init__(self, openai_api_key: str, gmail_credentials: str):
         self.api_manager = APIManager(openai_api_key)
-        self.web_scraper = OptimizedWebScraper(self.api_manager)
+        self.web_scraper = NoWebDriverScraper(self.api_manager)
         self.db = DatabaseManager()
 
         # Gmail setup
@@ -600,17 +625,20 @@ class ResearchOrchestrator:
             self.gmail_manager = None
 
         self.is_running = False
-        self.progress_queue = queue.Queue()
+        self.progress_messages = []
 
-    def set_progress(self, message: str, progress: float = None):
-        """Set progress message for UI."""
-        self.progress_queue.put(
-            {"message": message, "progress": progress, "timestamp": datetime.now()})
+    def add_progress_message(self, message: str):
+        """Add progress message for UI."""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        formatted_message = f"[{timestamp}] {message}"
+        self.progress_messages.append(formatted_message)
+        if len(self.progress_messages) > 20:
+            self.progress_messages = self.progress_messages[-20:]
 
-    async def run_stage1_research(self, universities: List[University], user_research_profile: str):
-        """Run Stage 1: Extract and match professors (cost-effective)."""
+    def run_stage1_research_sync(self, universities: List[University], user_research_profile: str):
+        """Run Stage 1: Extract and match professors (cost-effective) - Sync version."""
         self.is_running = True
-        self.set_progress(
+        self.add_progress_message(
             "🚀 Starting Stage 1: Professor Discovery & Matching...")
 
         try:
@@ -618,14 +646,12 @@ class ResearchOrchestrator:
                 if not self.is_running:
                     break
 
-                progress = (i / len(universities)) * \
-                    50  # Stage 1 is 50% of total
-                self.set_progress(
-                    f"🔍 Stage 1: Researching {university.name}...", progress)
+                self.add_progress_message(
+                    f"🔍 Stage 1: Researching {university.name} ({i+1}/{len(universities)})...")
 
                 departments = [dept.strip()
                                for dept in university.departments.split(',')]
-                professors = await self.web_scraper.scrape_university_faculty(
+                professors = self.web_scraper.scrape_university_faculty_sync(
                     university.name, departments, user_research_profile
                 )
 
@@ -640,23 +666,23 @@ class ResearchOrchestrator:
                 self.db.update_cost_tracking(
                     stage1_cost, 0.0, len(professors), 0)
 
-                self.set_progress(
+                self.add_progress_message(
                     f"✅ Stage 1 Complete: {university.name} - {len(professors)} professors found "
                     f"(Cost: ${stage1_cost:.4f})"
                 )
 
-                await asyncio.sleep(3)  # Rate limiting between universities
+                time.sleep(3)  # Rate limiting between universities
 
         except Exception as e:
             logger.error(f"Stage 1 error: {e}")
-            self.set_progress(f"❌ Stage 1 error: {e}")
+            self.add_progress_message(f"❌ Stage 1 error: {e}")
         finally:
-            self.set_progress(
+            self.add_progress_message(
                 "✅ Stage 1 Complete: Professor discovery finished!")
 
-    async def run_stage2_email_generation(self, user_research_profile: str, user_name: str):
-        """Run Stage 2: Generate high-quality personalized emails."""
-        self.set_progress("📧 Starting Stage 2: Email Generation...")
+    def run_stage2_email_generation_sync(self, user_research_profile: str, user_name: str):
+        """Run Stage 2: Generate high-quality personalized emails - Sync version."""
+        self.add_progress_message("📧 Starting Stage 2: Email Generation...")
 
         try:
             # Get verified professors who need emails
@@ -674,11 +700,12 @@ class ResearchOrchestrator:
             conn.close()
 
             if not professor_rows:
-                self.set_progress("ℹ️ No professors need email generation")
+                self.add_progress_message(
+                    "ℹ️ No professors need email generation")
                 return
 
             total_professors = len(professor_rows)
-            self.set_progress(
+            self.add_progress_message(
                 f"📧 Generating emails for {total_professors} professors...")
 
             emails_generated = 0
@@ -692,15 +719,12 @@ class ResearchOrchestrator:
                 professor = Professor(
                     **{k: v for k, v in professor_data.items() if k != 'id'})
 
-                progress = 50 + (i / total_professors) * \
-                    50  # Stage 2 is second 50%
-                self.set_progress(
-                    f"✍️ Generating email for {professor.name} (Score: {professor.alignment_score:.1f})",
-                    progress
+                self.add_progress_message(
+                    f"✍️ Generating email for {professor.name} (Score: {professor.alignment_score:.1f}) [{i+1}/{total_professors}]"
                 )
 
                 # Stage 2: Generate personalized email
-                email_result = await self.api_manager.stage2_draft_email(
+                email_result = self.api_manager.stage2_draft_email_sync(
                     professor, user_research_profile, user_name
                 )
 
@@ -723,27 +747,81 @@ class ResearchOrchestrator:
                     emails_generated += 1
                     total_stage2_cost += email_result["cost"]
 
-                    self.set_progress(
-                        f"✅ Email generated for {professor.name} (Cost: ${email_result['cost']:.4f})"
-                    )
+                    self.add_progress_message(
+                        f"✅ Email generated for {professor.name} (Cost: ${email_result['cost']:.4f})")
                 else:
-                    self.set_progress(
+                    self.add_progress_message(
                         f"❌ Failed to generate email for {professor.name}")
 
-                await asyncio.sleep(1)  # Rate limiting
+                time.sleep(1)  # Rate limiting
 
             # Update cost tracking
             self.db.update_cost_tracking(
                 0.0, total_stage2_cost, 0, emails_generated)
 
-            self.set_progress(
+            self.add_progress_message(
                 f"✅ Stage 2 Complete: {emails_generated} emails generated "
                 f"(Total cost: ${total_stage2_cost:.4f})"
             )
 
         except Exception as e:
             logger.error(f"Stage 2 error: {e}")
-            self.set_progress(f"❌ Stage 2 error: {e}")
+            self.add_progress_message(f"❌ Stage 2 error: {e}")
+
+    def generate_single_email_sync(self, professor_id: int, user_name: str, user_research_profile: str) -> bool:
+        """Generate email for a single professor - Sync version."""
+        try:
+            conn = sqlite3.connect(self.db.db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                'SELECT * FROM professors WHERE id = ?', (professor_id,))
+
+            columns = [description[0] for description in cursor.description]
+            row = cursor.fetchone()
+            conn.close()
+
+            if row:
+                professor_data = dict(zip(columns, row))
+                professor = Professor(
+                    **{k: v for k, v in professor_data.items() if k != 'id'})
+
+                # Generate email
+                email_result = self.api_manager.stage2_draft_email_sync(
+                    professor, user_research_profile, user_name
+                )
+
+                if email_result["success"]:
+                    # Update database
+                    conn = sqlite3.connect(self.db.db_path)
+                    cursor = conn.cursor()
+                    cursor.execute('''
+                        UPDATE professors 
+                        SET draft_email_subject = ?, draft_email_body = ?, 
+                            stage2_cost = ?, status = 'email_drafted'
+                        WHERE id = ?
+                    ''', (
+                        email_result["subject"], email_result["body"],
+                        email_result["cost"], professor_id
+                    ))
+                    conn.commit()
+                    conn.close()
+
+                    self.add_progress_message(
+                        f"✅ Email generated for {professor.name}")
+                    return True
+                else:
+                    self.add_progress_message(
+                        f"❌ Failed to generate email: {email_result.get('error', 'Unknown error')}")
+                    return False
+            else:
+                self.add_progress_message("❌ Professor not found")
+                return False
+
+        except Exception as e:
+            logger.error(
+                f"Error generating email for professor {professor_id}: {e}")
+            self.add_progress_message(f"❌ Error generating email: {e}")
+            return False
 
     def stop_research(self):
         """Stop the research pipeline."""
@@ -751,9 +829,24 @@ class ResearchOrchestrator:
         if self.web_scraper:
             self.web_scraper.close_driver()
 
+
+# Synchronous wrapper functions for Streamlit compatibility
+def run_stage1_sync(universities: List[University], user_research_profile: str, orchestrator: ResearchOrchestrator):
+    """Synchronous wrapper for Stage 1 research."""
+    return orchestrator.run_stage1_research_sync(universities, user_research_profile)
+
+
+def run_stage2_sync(user_research_profile: str, user_name: str, orchestrator: ResearchOrchestrator):
+    """Synchronous wrapper for Stage 2 email generation."""
+    return orchestrator.run_stage2_email_generation_sync(user_research_profile, user_name)
+
+
+def generate_single_email_sync(professor_id: int, user_name: str, orchestrator: ResearchOrchestrator, user_research_profile: str) -> bool:
+    """Synchronous wrapper for single email generation."""
+    return orchestrator.generate_single_email_sync(professor_id, user_name, user_research_profile)
+
+
 # Streamlit UI
-
-
 def main():
     st.set_page_config(
         page_title="PhD Outreach Automation - 2-Stage System",
@@ -787,6 +880,14 @@ def main():
         margin: 0.5rem 0;
         border-left: 3px solid #2196f3;
     }
+    .progress-message {
+        background: #f8f9fa;
+        padding: 0.3rem;
+        border-radius: 3px;
+        margin: 0.2rem 0;
+        font-family: monospace;
+        font-size: 0.8rem;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -799,6 +900,8 @@ def main():
         st.session_state.research_profile = ""
     if 'cv_uploaded' not in st.session_state:
         st.session_state.cv_uploaded = False
+    if 'progress_messages' not in st.session_state:
+        st.session_state.progress_messages = []
 
     # Sidebar configuration
     with st.sidebar:
@@ -810,33 +913,39 @@ def main():
 
         if openai_key:
             if st.session_state.orchestrator is None:
-                st.session_state.orchestrator = ResearchOrchestrator(
-                    openai_key, "credentials.json")
-                st.success("✅ API connected!")
+                try:
+                    st.session_state.orchestrator = ResearchOrchestrator(
+                        openai_key, "credentials.json")
+                    st.success("✅ API connected!")
+                except Exception as e:
+                    st.error(f"❌ Failed to initialize: {e}")
 
         st.markdown("---")
 
         # Cost tracking
         st.header("💰 Cost Tracking")
         if st.session_state.orchestrator:
-            cost_summary = st.session_state.orchestrator.db.get_cost_summary()
+            try:
+                cost_summary = st.session_state.orchestrator.db.get_cost_summary()
 
-            col1, col2 = st.columns(2)
-            with col1:
-                st.metric("Today's Cost",
-                          f"${cost_summary['today']['total_cost']:.4f}")
-                st.caption(
-                    f"Stage 1: ${cost_summary['today']['stage1_cost']:.4f}")
-                st.caption(
-                    f"Stage 2: ${cost_summary['today']['stage2_cost']:.4f}")
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Today's Cost",
+                              f"${cost_summary['today']['total_cost']:.4f}")
+                    st.caption(
+                        f"Stage 1: ${cost_summary['today']['stage1_cost']:.4f}")
+                    st.caption(
+                        f"Stage 2: ${cost_summary['today']['stage2_cost']:.4f}")
 
-            with col2:
-                st.metric("Total Cost",
-                          f"${cost_summary['total']['total_cost']:.4f}")
-                st.caption(
-                    f"Professors: {cost_summary['total']['professors_processed']}")
-                st.caption(
-                    f"Emails: {cost_summary['total']['emails_generated']}")
+                with col2:
+                    st.metric("Total Cost",
+                              f"${cost_summary['total']['total_cost']:.4f}")
+                    st.caption(
+                        f"Professors: {cost_summary['total']['professors_processed']}")
+                    st.caption(
+                        f"Emails: {cost_summary['total']['emails_generated']}")
+            except Exception as e:
+                st.error(f"Error loading cost data: {e}")
 
         st.markdown("---")
 
@@ -908,40 +1017,47 @@ def main():
         st.header("🎯 Target Universities")
 
         # Load and display target universities
+        universities_to_research = []
+
         if os.path.exists("PhD_Targets.csv"):
-            df_targets = pd.read_csv("PhD_Targets.csv")
+            try:
+                df_targets = pd.read_csv("PhD_Targets.csv")
 
-            # University selection and management
-            universities_to_research = []
+                # University selection and management
+                for idx, row in df_targets.iterrows():
+                    with st.expander(f"{row['University Name']} ({row['Priority']} Priority)"):
+                        col_a, col_b, col_c = st.columns([2, 1, 1])
 
-            for idx, row in df_targets.iterrows():
-                with st.expander(f"{row['University Name']} ({row['Priority']} Priority)"):
-                    col_a, col_b, col_c = st.columns([2, 1, 1])
+                        with col_a:
+                            st.write(f"**Country:** {row['Country']}")
+                            st.write(
+                                f"**Departments:** {row['Departments to Search']}")
+                            st.write(f"**Notes:** {row['Notes']}")
 
-                    with col_a:
-                        st.write(f"**Country:** {row['Country']}")
-                        st.write(
-                            f"**Departments:** {row['Departments to Search']}")
-                        st.write(f"**Notes:** {row['Notes']}")
+                        with col_b:
+                            include = st.checkbox(
+                                "Include", key=f"include_{idx}", value=True)
 
-                    with col_b:
-                        include = st.checkbox(
-                            "Include", key=f"include_{idx}", value=True)
+                        with col_c:
+                            if st.button("🗑️ Remove", key=f"remove_{idx}"):
+                                df_targets = df_targets.drop(idx)
+                                df_targets.to_csv(
+                                    "PhD_Targets.csv", index=False)
+                                st.experimental_rerun()
 
-                    with col_c:
-                        if st.button("🗑️ Remove", key=f"remove_{idx}"):
-                            df_targets = df_targets.drop(idx)
-                            df_targets.to_csv("PhD_Targets.csv", index=False)
-                            st.experimental_rerun()
-
-                    if include:
-                        universities_to_research.append(University(
-                            name=row['University Name'],
-                            country=row['Country'],
-                            departments=row['Departments to Search'],
-                            priority=row['Priority'],
-                            notes=row['Notes']
-                        ))
+                        if include:
+                            universities_to_research.append(University(
+                                name=row['University Name'],
+                                country=row['Country'],
+                                departments=row['Departments to Search'],
+                                priority=row['Priority'],
+                                notes=row['Notes']
+                            ))
+            except Exception as e:
+                st.error(f"Error loading universities: {e}")
+        else:
+            st.warning(
+                "PhD_Targets.csv not found. Please add universities below.")
 
         # Add new university
         st.subheader("➕ Add New University")
@@ -954,22 +1070,27 @@ def main():
 
             if st.form_submit_button("Add University"):
                 if new_name and new_country and new_departments:
-                    new_row = pd.DataFrame([{
-                        'University Name': new_name,
-                        'Country': new_country,
-                        'Departments to Search': new_departments,
-                        'Priority': new_priority,
-                        'Notes': new_notes
-                    }])
-                    if os.path.exists("PhD_Targets.csv"):
-                        df_targets = pd.read_csv("PhD_Targets.csv")
-                        df_targets = pd.concat(
-                            [df_targets, new_row], ignore_index=True)
-                    else:
-                        df_targets = new_row
-                    df_targets.to_csv("PhD_Targets.csv", index=False)
-                    st.success("✅ University added!")
-                    st.experimental_rerun()
+                    try:
+                        new_row = pd.DataFrame([{
+                            'University Name': new_name,
+                            'Country': new_country,
+                            'Departments to Search': new_departments,
+                            'Priority': new_priority,
+                            'Notes': new_notes
+                        }])
+
+                        if os.path.exists("PhD_Targets.csv"):
+                            df_targets = pd.read_csv("PhD_Targets.csv")
+                            df_targets = pd.concat(
+                                [df_targets, new_row], ignore_index=True)
+                        else:
+                            df_targets = new_row
+
+                        df_targets.to_csv("PhD_Targets.csv", index=False)
+                        st.success("✅ University added!")
+                        st.experimental_rerun()
+                    except Exception as e:
+                        st.error(f"Error adding university: {e}")
                 else:
                     st.error("Please fill all required fields")
 
@@ -981,9 +1102,11 @@ def main():
 
             # Stage indicators
             st.markdown(
-                '<div class="stage-indicator"><strong>Stage 1:</strong> Professor Discovery & Matching (gpt-4o-mini - Cost Effective)</div>', unsafe_allow_html=True)
+                '<div class="stage-indicator"><strong>Stage 1:</strong> Professor Discovery & Matching (gpt-4o-mini - Cost Effective)</div>',
+                unsafe_allow_html=True)
             st.markdown(
-                '<div class="stage-indicator"><strong>Stage 2:</strong> Personalized Email Generation (gpt-4 - High Quality)</div>', unsafe_allow_html=True)
+                '<div class="stage-indicator"><strong>Stage 2:</strong> Personalized Email Generation (gpt-4 - High Quality)</div>',
+                unsafe_allow_html=True)
 
             # Control buttons
             col_stage1, col_stage2, col_stop = st.columns(3)
@@ -999,6 +1122,7 @@ def main():
                                 st.experimental_rerun()
                             except Exception as e:
                                 st.error(f"❌ Stage 1 failed: {e}")
+                                logger.error(f"Stage 1 error: {e}")
                     else:
                         st.warning("No universities selected!")
 
@@ -1013,6 +1137,7 @@ def main():
                                 st.experimental_rerun()
                             except Exception as e:
                                 st.error(f"❌ Stage 2 failed: {e}")
+                                logger.error(f"Stage 2 error: {e}")
                     else:
                         st.warning("Please enter your name in settings!")
 
@@ -1020,6 +1145,7 @@ def main():
                 if st.button("⏹️ Stop", help="Stop current process"):
                     if st.session_state.orchestrator:
                         st.session_state.orchestrator.stop_research()
+                        st.info("🛑 Process stopped")
         else:
             st.warning("⚠️ Please configure API key and upload CV first!")
 
@@ -1037,98 +1163,118 @@ def main():
                     "Min Alignment Score", 0.0, 10.0, 6.0, 0.5)
 
             # Get professors from database
-            conn = sqlite3.connect(st.session_state.orchestrator.db.db_path)
-            query = "SELECT * FROM professors WHERE alignment_score >= ?"
-            params = [min_score]
+            try:
+                conn = sqlite3.connect(
+                    st.session_state.orchestrator.db.db_path)
+                query = "SELECT * FROM professors WHERE alignment_score >= ?"
+                params = [min_score]
 
-            if status_filter != "All":
-                query += " AND status = ?"
-                params.append(status_filter)
+                if status_filter != "All":
+                    query += " AND status = ?"
+                    params.append(status_filter)
 
-            query += " ORDER BY alignment_score DESC"
+                query += " ORDER BY alignment_score DESC"
 
-            professors_df = pd.read_sql_query(query, conn, params=params)
-            conn.close()
+                professors_df = pd.read_sql_query(query, conn, params=params)
+                conn.close()
 
-            if not professors_df.empty:
-                st.write(f"**{len(professors_df)} professors found**")
+                if not professors_df.empty:
+                    st.write(f"**{len(professors_df)} professors found**")
 
-                # Display professors
-                for idx, prof in professors_df.iterrows():
-                    alignment_color = "🟢" if prof['alignment_score'] >= 8 else "🟡" if prof['alignment_score'] >= 6 else "🔴"
+                    # Display professors
+                    for idx, prof in professors_df.iterrows():
+                        alignment_color = "🟢" if prof['alignment_score'] >= 8 else "🟡" if prof['alignment_score'] >= 6 else "🔴"
 
-                    with st.expander(f"{alignment_color} {prof['name']} - {prof['university']} (Score: {prof['alignment_score']:.1f})"):
-                        col_info, col_actions = st.columns([2, 1])
+                        with st.expander(f"{alignment_color} {prof['name']} - {prof['university']} (Score: {prof['alignment_score']:.1f})"):
+                            col_info, col_actions = st.columns([2, 1])
 
-                        with col_info:
-                            st.write(f"**Department:** {prof['department']}")
-                            st.write(f"**Email:** {prof['email']}")
-                            st.write(
-                                f"**Research:** {prof['research_interests'][:200]}...")
-                            st.write(
-                                f"**Collaboration Potential:** {prof['collaboration_potential']}")
-                            if prof['profile_url']:
+                            with col_info:
                                 st.write(
-                                    f"**Profile:** [{prof['profile_url']}]({prof['profile_url']})")
-                            st.write(f"**Status:** {prof['status']}")
-                            st.write(
-                                f"**Costs:** Stage 1: ${prof['stage1_cost']:.4f}, Stage 2: ${prof['stage2_cost']:.4f}")
+                                    f"**Department:** {prof['department']}")
+                                st.write(f"**Email:** {prof['email']}")
+                                if prof['research_interests']:
+                                    research_text = prof['research_interests'][:200] + (
+                                        "..." if len(prof['research_interests']) > 200 else "")
+                                    st.write(f"**Research:** {research_text}")
+                                if prof['collaboration_potential']:
+                                    st.write(
+                                        f"**Collaboration Potential:** {prof['collaboration_potential']}")
+                                if prof['profile_url']:
+                                    st.write(
+                                        f"**Profile:** [{prof['profile_url']}]({prof['profile_url']})")
+                                st.write(f"**Status:** {prof['status']}")
+                                st.write(
+                                    f"**Costs:** Stage 1: ${prof['stage1_cost']:.4f}, Stage 2: ${prof['stage2_cost']:.4f}")
 
-                            # Show email draft if available
-                            if prof['draft_email_subject']:
-                                st.markdown("**📧 Draft Email:**")
-                                st.text_input(
-                                    "Subject:", value=prof['draft_email_subject'], key=f"subject_{prof['id']}", disabled=True)
-                                st.text_area(
-                                    "Body:", value=prof['draft_email_body'][:300] + "...", key=f"body_{prof['id']}", height=100, disabled=True)
+                                # Show email draft if available
+                                if prof['draft_email_subject']:
+                                    st.markdown("**📧 Draft Email:**")
+                                    st.text_input("Subject:", value=prof['draft_email_subject'],
+                                                  key=f"subject_{prof['id']}", disabled=True)
+                                    email_body = prof['draft_email_body'][:300] + (
+                                        "..." if len(prof['draft_email_body']) > 300 else "")
+                                    st.text_area("Body:", value=email_body,
+                                                 key=f"body_{prof['id']}", height=100, disabled=True)
 
-                        with col_actions:
-                            # Action buttons based on status
-                            if prof['status'] == 'verified':
-                                if st.button("📧 Generate Email", key=f"gen_email_{prof['id']}"):
-                                    with st.spinner("Generating email..."):
-                                        try:
-                                            success = generate_single_email_sync(
-                                                prof['id'], user_name, st.session_state.orchestrator, st.session_state.research_profile
-                                            )
-                                            if success:
-                                                st.success(
-                                                    f"✅ Email generated!")
-                                                st.experimental_rerun()
-                                            else:
-                                                st.error(
-                                                    "❌ Failed to generate email")
-                                        except Exception as e:
-                                            st.error(f"❌ Error: {e}")
+                            with col_actions:
+                                # Action buttons based on status
+                                if prof['status'] == 'verified':
+                                    if st.button("📧 Generate Email", key=f"gen_email_{prof['id']}"):
+                                        if user_name:
+                                            with st.spinner("Generating email..."):
+                                                try:
+                                                    success = generate_single_email_sync(
+                                                        prof['id'], user_name, st.session_state.orchestrator,
+                                                        st.session_state.research_profile
+                                                    )
+                                                    if success:
+                                                        st.success(
+                                                            "✅ Email generated!")
+                                                        st.experimental_rerun()
+                                                    else:
+                                                        st.error(
+                                                            "❌ Failed to generate email")
+                                                except Exception as e:
+                                                    st.error(f"❌ Error: {e}")
+                                        else:
+                                            st.warning(
+                                                "Please enter your name in settings!")
 
-                            elif prof['status'] == 'email_drafted':
-                                if st.button("👀 Preview Email", key=f"preview_{prof['id']}"):
-                                    show_email_preview(prof)
+                                elif prof['status'] == 'email_drafted':
+                                    if st.button("👀 Preview Email", key=f"preview_{prof['id']}"):
+                                        show_email_preview(prof)
 
-                                if st.button("📤 Send Email", key=f"send_{prof['id']}", type="primary"):
-                                    st.info(
-                                        "📧 Gmail integration: Email ready to send!")
-                                    # Gmail sending would be implemented here
+                                    if st.button("📤 Send Email", key=f"send_{prof['id']}", type="primary"):
+                                        st.info(
+                                            "📧 Gmail integration: Email ready to send!")
+                                        # Gmail sending would be implemented here
 
-                            elif prof['status'] == 'email_sent':
-                                st.success("✅ Email Sent")
-                                if st.button("📬 View in Gmail", key=f"gmail_{prof['id']}"):
-                                    st.info(
-                                        "📬 Gmail integration: Open sent email")
+                                elif prof['status'] == 'email_sent':
+                                    st.success("✅ Email Sent")
+                                    if st.button("📬 View in Gmail", key=f"gmail_{prof['id']}"):
+                                        st.info(
+                                            "📬 Gmail integration: Open sent email")
 
-                            # Delete button
-                            if st.button("🗑️ Delete", key=f"delete_{prof['id']}"):
-                                conn = sqlite3.connect(
-                                    st.session_state.orchestrator.db.db_path)
-                                cursor = conn.cursor()
-                                cursor.execute(
-                                    "DELETE FROM professors WHERE id = ?", (prof['id'],))
-                                conn.commit()
-                                conn.close()
-                                st.experimental_rerun()
-            else:
-                st.info(
-                    "No professors found yet. Run Stage 1 to discover professors!")
+                                # Delete button
+                                if st.button("🗑️ Delete", key=f"delete_{prof['id']}"):
+                                    try:
+                                        conn = sqlite3.connect(
+                                            st.session_state.orchestrator.db.db_path)
+                                        cursor = conn.cursor()
+                                        cursor.execute(
+                                            "DELETE FROM professors WHERE id = ?", (prof['id'],))
+                                        conn.commit()
+                                        conn.close()
+                                        st.experimental_rerun()
+                                    except Exception as e:
+                                        st.error(
+                                            f"Error deleting professor: {e}")
+                else:
+                    st.info(
+                        "No professors found yet. Run Stage 1 to discover professors!")
+
+            except Exception as e:
+                st.error(f"Error loading professors: {e}")
 
     # Progress and status area
     st.markdown("---")
@@ -1138,130 +1284,73 @@ def main():
         # Progress metrics
         prog_col1, prog_col2, prog_col3, prog_col4 = st.columns(4)
 
-        conn = sqlite3.connect(st.session_state.orchestrator.db.db_path)
+        try:
+            conn = sqlite3.connect(st.session_state.orchestrator.db.db_path)
 
-        # Get counts by status
-        status_counts = pd.read_sql_query('''
-            SELECT status, COUNT(*) as count, AVG(alignment_score) as avg_score,
-                   SUM(stage1_cost) as total_stage1, SUM(stage2_cost) as total_stage2
-            FROM professors 
-            GROUP BY status
-        ''', conn)
+            # Get counts by status
+            status_counts = pd.read_sql_query('''
+                SELECT status, COUNT(*) as count, AVG(alignment_score) as avg_score,
+                       SUM(stage1_cost) as total_stage1, SUM(stage2_cost) as total_stage2
+                FROM professors 
+                GROUP BY status
+            ''', conn)
 
-        conn.close()
+            conn.close()
 
-        with prog_col1:
-            pending = status_counts[status_counts['status'] == 'pending']['count'].sum(
-            ) if not status_counts.empty else 0
-            st.metric("⏳ Pending", int(pending))
+            with prog_col1:
+                pending = status_counts[status_counts['status'] == 'pending']['count'].sum(
+                ) if not status_counts.empty else 0
+                st.metric("⏳ Pending", int(pending))
 
-        with prog_col2:
-            verified = status_counts[status_counts['status'] == 'verified']['count'].sum(
-            ) if not status_counts.empty else 0
-            st.metric("✅ Verified", int(verified))
+            with prog_col2:
+                verified = status_counts[status_counts['status'] == 'verified']['count'].sum(
+                ) if not status_counts.empty else 0
+                st.metric("✅ Verified", int(verified))
 
-        with prog_col3:
-            drafted = status_counts[status_counts['status'] == 'email_drafted']['count'].sum(
-            ) if not status_counts.empty else 0
-            st.metric("📧 Emails Drafted", int(drafted))
+            with prog_col3:
+                drafted = status_counts[status_counts['status'] == 'email_drafted']['count'].sum(
+                ) if not status_counts.empty else 0
+                st.metric("📧 Emails Drafted", int(drafted))
 
-        with prog_col4:
-            sent = status_counts[status_counts['status'] == 'email_sent']['count'].sum(
-            ) if not status_counts.empty else 0
-            st.metric("📤 Emails Sent", int(sent))
+            with prog_col4:
+                sent = status_counts[status_counts['status'] == 'email_sent']['count'].sum(
+                ) if not status_counts.empty else 0
+                st.metric("📤 Emails Sent", int(sent))
 
-        # Cost breakdown chart
-        if not status_counts.empty:
-            st.subheader("💰 Cost Breakdown by Stage")
+            # Cost breakdown chart
+            if not status_counts.empty:
+                st.subheader("💰 Cost Breakdown by Stage")
 
-            chart_col1, chart_col2 = st.columns(2)
+                chart_col1, chart_col2 = st.columns(2)
 
-            with chart_col1:
-                total_stage1 = status_counts['total_stage1'].sum()
-                total_stage2 = status_counts['total_stage2'].sum()
+                with chart_col1:
+                    total_stage1 = status_counts['total_stage1'].sum()
+                    total_stage2 = status_counts['total_stage2'].sum()
 
-                cost_data = pd.DataFrame({
-                    'Stage': ['Stage 1 (Discovery)', 'Stage 2 (Email Gen)'],
-                    'Cost': [total_stage1, total_stage2],
-                    'Description': ['gpt-4o-mini - Cost Effective', 'gpt-4 - High Quality']
-                })
+                    cost_data = pd.DataFrame({
+                        'Stage': ['Stage 1 (Discovery)', 'Stage 2 (Email Gen)'],
+                        'Cost': [total_stage1, total_stage2],
+                        'Description': ['gpt-4o-mini - Cost Effective', 'gpt-4 - High Quality']
+                    })
 
-                st.bar_chart(cost_data.set_index('Stage')['Cost'])
+                    if total_stage1 > 0 or total_stage2 > 0:
+                        st.bar_chart(cost_data.set_index('Stage')['Cost'])
 
-            with chart_col2:
-                st.dataframe(cost_data)
+                with chart_col2:
+                    st.dataframe(cost_data)
+
+        except Exception as e:
+            st.error(f"Error loading analytics: {e}")
 
         # Progress messages
-        if hasattr(st.session_state, 'progress_messages'):
+        if st.session_state.orchestrator and hasattr(st.session_state.orchestrator, 'progress_messages'):
             st.subheader("🔄 Live Progress")
-            for message in st.session_state.progress_messages[-10:]:
-                st.text(message)
 
-# Async helper functions
-
-
-async def run_stage1_async(universities):
-    """Run Stage 1 research asynchronously."""
-    if st.session_state.orchestrator and st.session_state.research_profile:
-        await st.session_state.orchestrator.run_stage1_research(universities, st.session_state.research_profile)
-
-
-async def run_stage2_async(user_name):
-    """Run Stage 2 email generation asynchronously."""
-    if st.session_state.orchestrator and st.session_state.research_profile:
-        await st.session_state.orchestrator.run_stage2_email_generation(st.session_state.research_profile, user_name)
-
-
-async def generate_single_email_async(professor_id, user_name):
-    """Generate email for a single professor."""
-    if st.session_state.orchestrator and st.session_state.research_profile:
-        conn = sqlite3.connect(st.session_state.orchestrator.db.db_path)
-        cursor = conn.cursor()
-        cursor.execute('SELECT * FROM professors WHERE id = ?',
-                       (professor_id,))
-
-        columns = [description[0] for description in cursor.description]
-        row = cursor.fetchone()
-        conn.close()
-
-        if row:
-            professor_data = dict(zip(columns, row))
-            professor = Professor(
-                **{k: v for k, v in professor_data.items() if k != 'id'})
-
-            # Generate email
-            email_result = await st.session_state.orchestrator.api_manager.stage2_draft_email(
-                professor, st.session_state.research_profile, user_name
-            )
-
-            if email_result["success"]:
-                # Update database
-                conn = sqlite3.connect(
-                    st.session_state.orchestrator.db.db_path)
-                cursor = conn.cursor()
-                cursor.execute('''
-                    UPDATE professors 
-                    SET draft_email_subject = ?, draft_email_body = ?, 
-                        stage2_cost = ?, status = 'email_drafted'
-                    WHERE id = ?
-                ''', (
-                    email_result["subject"], email_result["body"],
-                    email_result["cost"], professor_id
-                ))
-                conn.commit()
-                conn.close()
-
-                st.success(f"✅ Email generated for {professor.name}")
-                st.experimental_rerun()
-            else:
-                st.error(
-                    f"❌ Failed to generate email: {email_result.get('error', 'Unknown error')}")
-
-
-async def send_email_async(professor_id):
-    """Send email to professor."""
-    # This would integrate with Gmail API
-    st.info("📧 Email sending feature will be implemented with Gmail API integration")
+            # Show recent progress messages
+            recent_messages = st.session_state.orchestrator.progress_messages[-10:]
+            for message in recent_messages:
+                st.markdown(
+                    f'<div class="progress-message">{message}</div>', unsafe_allow_html=True)
 
 
 def show_email_preview(professor_data):
@@ -1284,7 +1373,8 @@ def show_email_preview(professor_data):
         st.write(f"Score: {professor_data['alignment_score']:.1f}/10")
 
         if st.button("📤 Send Email", type="primary"):
-            asyncio.run(send_email_async(professor_data['id']))
+            st.info(
+                "📧 Email sending feature will be implemented with Gmail API integration")
 
         if st.button("✏️ Edit Email"):
             st.info("Email editing feature coming soon")
