@@ -1,0 +1,9 @@
+University Name,Country,Departments to Search,Priority,Notes
+Massachusetts Institute of Technology,USA,"CS, ECE, Robotics, BioE",High,"Human Augmentation, Biomechatronics, AI in Robotics"
+Stanford University,USA,"CS, Robotics, HCI",High,"Symbolic AI, BMI, HCI, NLP, exoskeletons"
+University of Oxford,UK,"CS, Stats, Engineering",High,"Symbolic AI, deep learning for social good, causal inference"
+University of Cambridge,UK,"CS, Engineering, Bioinformatics",High,"Machine learning, computational neuroscience"
+Carnegie Mellon University,USA,"CS, Robotics, ML",High,"Robotics, computer vision, machine learning"
+UC Berkeley,USA,"EECS, CS",High,"AI, machine learning, computer vision"
+ETH Zurich,Switzerland,"CS, Engineering",Medium,"Robotics, AI, computer systems"
+University of Toronto,Canada,"CS, Engineering",Medium,"AI, machine learning, robotics"

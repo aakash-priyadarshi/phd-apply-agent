@@ -1,0 +1,53 @@
+# PhD Outreach Automation - Streamlit Requirements
+
+# Core Streamlit and UI
+streamlit>=1.28.0
+pandas>=1.5.0
+numpy>=1.24.0
+
+# AI and OpenAI
+openai>=1.3.0
+
+# Web Scraping
+beautifulsoup4>=4.12.0
+selenium>=4.15.0
+aiohttp>=3.8.0
+requests>=2.31.0
+
+# Google APIs
+google-auth>=2.15.0
+google-auth-oauthlib>=0.8.0
+google-auth-httplib2>=0.1.1
+google-api-python-client>=2.70.0
+
+# Database
+sqlite3  # Built into Python
+
+# PDF Processing
+PyPDF2>=3.0.0
+
+# Email handling
+email-validator>=2.0.0
+
+# Async support
+asyncio  # Built into Python
+aiofiles>=23.0.0
+
+# File handling
+pathlib  # Built into Python
+python-dotenv>=1.0.0
+
+# Logging and utilities
+logging  # Built into Python
+datetime  # Built into Python
+json  # Built into Python
+threading  # Built into Python
+queue  # Built into Python
+
+# Additional utilities
+tqdm>=4.65.0  # Progress bars
+python-dateutil>=2.8.0
+
+# Chrome WebDriver (install separately)
+# Download from: https://chromedriver.chromium.org/
+# Or use: webdriver-manager>=4.0.0
