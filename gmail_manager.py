@@ -8,6 +8,7 @@ import os
 import base64
 import json
 import logging
+import html
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 import pickle
@@ -107,10 +108,10 @@ class GmailManager:
     
     def create_email_message(self, to_email: str, subject: str, body: str, 
                            from_name: str, cv_path: str = "") -> MIMEMultipart:
-        """Create email message with optional CV attachment."""
+        """Create email message with optional CV attachment and proper formatting."""
         
-        # Create message
-        message = MIMEMultipart()
+        # Create message with alternative structure for better compatibility
+        message = MIMEMultipart('alternative')
         message['to'] = to_email
         message['subject'] = subject
         
@@ -118,29 +119,83 @@ class GmailManager:
         user_email = self.user_email if self.user_email else "unknown@example.com"
         message['from'] = f"{from_name} <{user_email}>" if from_name else user_email
         
-        # Add body
-        body_part = MIMEText(body, 'plain', 'utf-8')
-        message.attach(body_part)
+        # Add proper email headers for better authentication and deliverability
+        message['Reply-To'] = user_email
+        message['Return-Path'] = user_email
+        message['X-Mailer'] = 'PhD Outreach Agent v1.0'
+        message['X-Priority'] = '3'  # Normal priority
+        message['Message-ID'] = f"<{datetime.now().strftime('%Y%m%d%H%M%S')}.{hash(to_email + subject)}@{user_email.split('@')[1] if '@' in user_email else 'localhost'}>"
+        message['Date'] = datetime.now().strftime('%a, %d %b %Y %H:%M:%S %z')
         
-        # Add CV attachment if provided and file exists
+        # Format the email body properly
+        # Replace \\n\\n with actual line breaks for proper formatting
+        formatted_body = body.replace('\\n\\n', '\n\n').replace('\\n', '\n')
+        
+        # Create text and HTML versions
+        text_part = MIMEText(formatted_body, 'plain', 'utf-8')
+        html_part = MIMEText(self._format_body_as_html(formatted_body), 'html', 'utf-8')
+        
+        # Attach both versions to the alternative container
+        message.attach(text_part)
+        message.attach(html_part)
+        
+        # If CV attachment exists, wrap everything in a mixed multipart
         if cv_path and os.path.exists(cv_path):
+            # Create new mixed message for attachments
+            mixed_message = MIMEMultipart('mixed')
+            
+            # Copy headers to mixed message
+            for key, value in message.items():
+                mixed_message[key] = value
+            
+            # Remove headers from alternative message
+            for key in list(message.keys()):
+                del message[key]
+            
+            # Attach the alternative message to mixed
+            mixed_message.attach(message)
+            
+            # Add CV attachment
             try:
                 with open(cv_path, "rb") as attachment:
-                    part = MIMEBase('application', 'octet-stream')
+                    part = MIMEBase('application', 'pdf')
                     part.set_payload(attachment.read())
                 
                 encoders.encode_base64(part)
                 part.add_header(
                     'Content-Disposition',
-                    f'attachment; filename= {os.path.basename(cv_path)}'
+                    f'attachment; filename="{os.path.basename(cv_path)}"'
                 )
-                message.attach(part)
+                mixed_message.attach(part)
                 logger.info(f"CV attached: {cv_path}")
+                
+                return mixed_message
                 
             except Exception as e:
                 logger.warning(f"Failed to attach CV: {e}")
+                return message
         
         return message
+    
+    def _format_body_as_html(self, body: str) -> str:
+        """Convert plain text email body to HTML with proper formatting."""
+        # Escape HTML characters
+        escaped_body = html.escape(body)
+        
+        # Convert line breaks to HTML
+        html_body = escaped_body.replace('\n\n', '</p><p>').replace('\n', '<br>')
+        
+        # Wrap in proper HTML structure
+        html_formatted = f"""
+        <html>
+          <head></head>
+          <body style="font-family: Arial, sans-serif; font-size: 14px; line-height: 1.6; color: #333;">
+            <p>{html_body}</p>
+          </body>
+        </html>
+        """
+        
+        return html_formatted
     
     def send_email(self, to_email: str, subject: str, body: str, 
                    from_name: str, cv_path: str = "") -> Dict[str, Any]:

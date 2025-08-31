@@ -13,6 +13,11 @@ yarn-error.log*
 .env.test.local
 .env.production.local
 
+# Gmail API Credentials and Tokens (SECURITY)
+credentials.json
+gmail_token.pickle
+*.pickle
+
 # Logs
 logs/
 *.log

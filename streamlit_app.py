@@ -239,19 +239,28 @@ class APIManager:
         Applicant Name: {user_name}
         
         Requirements:
-        1. Professional academic tone
+        1. Professional academic tone with proper email formatting
         2. Specific reference to professor's research
         3. Clear research alignment explanation
         4. Mention attached CV
         5. Request for PhD opportunity discussion
         6. Keep email body under 180 words
         7. Subject line under 80 characters
-        8. IMPORTANT: Use only standard ASCII characters in the JSON response. No tabs, newlines, or special characters within strings.
+        8. Format the email body with proper paragraphs separated by "\\n\\n"
+        9. Include greeting, 2-3 body paragraphs, closing, and signature
+        10. IMPORTANT: Use only standard ASCII characters in the JSON response. No tabs, newlines, or special characters within strings.
+        
+        Email Structure:
+        - Greeting: "Dear Dr. [Last Name],"
+        - Opening paragraph: Brief introduction and purpose
+        - Body paragraph(s): Research alignment and specific interests
+        - Closing paragraph: Request for discussion and mention CV attachment
+        - Professional closing: "Best regards," followed by applicant name
         
         Output as clean JSON with escaped strings:
         {{
             "subject": "Compelling subject line mentioning specific research area",
-            "body": "Professional email body with specific research connections",
+            "body": "Dear Dr. [Professor Last Name],\\n\\nOpening paragraph with introduction and purpose.\\n\\nBody paragraph with specific research alignment and interests.\\n\\nClosing paragraph with request for discussion and CV mention.\\n\\nBest regards,\\n{user_name}",
             "key_points": ["alignment point 1", "alignment point 2"],
             "tone_analysis": "professional/enthusiastic/research-focused"
         }}
@@ -1236,7 +1245,7 @@ def show_email_edit_modal(professor_data):
     
     edited_body = st.text_area(
         "Email Body:", 
-        value=professor_data.get('draft_email_body', ''), 
+        value=professor_data.get('draft_email_body', '').replace('\\n\\n', '\n\n').replace('\\n', '\n'), 
         height=300, 
         key=f"modal_body_{professor_data['id']}",
         help="Keep it professional and under 180 words")
@@ -1261,13 +1270,16 @@ def show_email_edit_modal(professor_data):
     with col1:
         if st.button("💾 Save Changes", key=f"modal_save_{professor_data['id']}", type="primary"):
             try:
+                # Convert line breaks back to escaped format for storage
+                saved_body = (edited_body or "").replace('\n\n', '\\n\\n').replace('\n', '\\n')
+                
                 conn = sqlite3.connect("phd_outreach.db")
                 cursor = conn.cursor()
                 cursor.execute('''
                     UPDATE professors 
                     SET draft_email_subject = ?, draft_email_body = ?
                     WHERE id = ?
-                ''', (edited_subject, edited_body, professor_data['id']))
+                ''', (edited_subject, saved_body, professor_data['id']))
                 conn.commit()
                 conn.close()
                 
@@ -1280,6 +1292,9 @@ def show_email_edit_modal(professor_data):
     with col2:
         if st.button("📤 Save & Send", key=f"modal_send_{professor_data['id']}"):
             try:
+                # Convert line breaks back to escaped format for storage
+                saved_body = (edited_body or "").replace('\n\n', '\\n\\n').replace('\n', '\\n')
+                
                 # First save the changes
                 conn = sqlite3.connect("phd_outreach.db")
                 cursor = conn.cursor()
@@ -1287,7 +1302,7 @@ def show_email_edit_modal(professor_data):
                     UPDATE professors 
                     SET draft_email_subject = ?, draft_email_body = ?
                     WHERE id = ?
-                ''', (edited_subject, edited_body, professor_data['id']))
+                ''', (edited_subject, saved_body, professor_data['id']))
                 conn.commit()
                 conn.close()
                 
@@ -1999,8 +2014,13 @@ def main():
                                 if prof['draft_email_subject']:
                                     st.markdown("**📧 Draft Email:**")
                                     st.text_input("Subject:", value=prof['draft_email_subject'], key=f"subject_{prof['id']}", disabled=True)
-                                    email_body = prof['draft_email_body'][:300] + ("..." if len(prof['draft_email_body']) > 300 else "")
-                                    st.text_area("Body:", value=email_body, key=f"body_{prof['id']}", height=100, disabled=True)
+                                    
+                                    # Format email body for display
+                                    email_body = prof['draft_email_body']
+                                    formatted_display = email_body.replace('\\n\\n', '\n\n').replace('\\n', '\n')
+                                    display_body = formatted_display[:300] + ("..." if len(formatted_display) > 300 else "")
+                                    
+                                    st.text_area("Body:", value=display_body, key=f"body_{prof['id']}", height=120, disabled=True)
 
                             with col_actions:
                                 # Action buttons based on status
