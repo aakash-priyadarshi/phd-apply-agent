@@ -43,7 +43,7 @@ class GmailManager:
         self._initialize_service()
     
     def _initialize_service(self) -> bool:
-        """Initialize Gmail service with authentication."""
+        """Initialize Gmail service with authentication and SSL error handling."""
         try:
             creds = None
             
@@ -74,12 +74,12 @@ class GmailManager:
                 with open(self.token_file, 'wb') as token:
                     pickle.dump(creds, token)
             
-            # Build the service
-            self.service = build('gmail', 'v1', credentials=creds)
+            # Build the service with credentials
+            self.service = build('gmail', 'v1', credentials=creds, cache_discovery=False)
             
             # Get user email
             profile = self.service.users().getProfile(userId='me').execute()
-            self.user_email = profile.get('emailAddress')
+            self.user_email = profile.get('emailAddress', '')
             
             logger.info(f"Gmail service initialized for: {self.user_email}")
             return True
@@ -106,20 +106,23 @@ class GmailManager:
             return {"success": False, "error": str(e)}
     
     def create_email_message(self, to_email: str, subject: str, body: str, 
-                           from_name: str, cv_path: str = None) -> MIMEMultipart:
+                           from_name: str, cv_path: str = "") -> MIMEMultipart:
         """Create email message with optional CV attachment."""
         
         # Create message
         message = MIMEMultipart()
         message['to'] = to_email
         message['subject'] = subject
-        message['from'] = f"{from_name} <{self.user_email}>" if from_name else self.user_email
+        
+        # Ensure user_email is a string
+        user_email = self.user_email if self.user_email else "unknown@example.com"
+        message['from'] = f"{from_name} <{user_email}>" if from_name else user_email
         
         # Add body
         body_part = MIMEText(body, 'plain', 'utf-8')
         message.attach(body_part)
         
-        # Add CV attachment if provided
+        # Add CV attachment if provided and file exists
         if cv_path and os.path.exists(cv_path):
             try:
                 with open(cv_path, "rb") as attachment:
@@ -132,6 +135,7 @@ class GmailManager:
                     f'attachment; filename= {os.path.basename(cv_path)}'
                 )
                 message.attach(part)
+                logger.info(f"CV attached: {cv_path}")
                 
             except Exception as e:
                 logger.warning(f"Failed to attach CV: {e}")
@@ -139,48 +143,90 @@ class GmailManager:
         return message
     
     def send_email(self, to_email: str, subject: str, body: str, 
-                   from_name: str, cv_path: str = None) -> Dict[str, Any]:
-        """Send a single email to a professor."""
+                   from_name: str, cv_path: str = "") -> Dict[str, Any]:
+        """Send a single email to a professor with retry logic for SSL issues."""
         
         if not self.service:
             return {"success": False, "error": "Gmail service not initialized"}
         
-        try:
-            # Create email message
-            message = self.create_email_message(to_email, subject, body, from_name, cv_path)
-            
-            # Convert to Gmail format
-            raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
-            gmail_message = {'raw': raw_message}
-            
-            # Send email
-            result = self.service.users().messages().send(
-                userId='me', 
-                body=gmail_message
-            ).execute()
-            
-            message_id = result.get('id')
-            logger.info(f"Email sent successfully to {to_email}, Message ID: {message_id}")
-            
-            return {
-                "success": True,
-                "message_id": message_id,
-                "to_email": to_email,
-                "sent_at": datetime.now().isoformat()
-            }
-            
-        except HttpError as e:
-            error_msg = f"Gmail API error: {e}"
-            logger.error(error_msg)
-            return {"success": False, "error": error_msg}
+        # Validate CV path - convert None to empty string
+        if cv_path is None:
+            cv_path = ""
         
-        except Exception as e:
-            error_msg = f"Email send error: {e}"
-            logger.error(error_msg)
-            return {"success": False, "error": error_msg}
+        max_retries = 3
+        retry_delay = 2
+        
+        for attempt in range(max_retries):
+            try:
+                # Create email message
+                message = self.create_email_message(to_email, subject, body, from_name, cv_path)
+                
+                # Convert to Gmail format
+                raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
+                gmail_message = {'raw': raw_message}
+                
+                # Send email
+                result = self.service.users().messages().send(
+                    userId='me', 
+                    body=gmail_message
+                ).execute()
+                
+                message_id = result.get('id')
+                logger.info(f"Email sent successfully to {to_email}, Message ID: {message_id}")
+                
+                return {
+                    "success": True,
+                    "message_id": message_id,
+                    "to_email": to_email,
+                    "sent_at": datetime.now().isoformat()
+                }
+                
+            except HttpError as e:
+                error_msg = f"Gmail API error: {e}"
+                logger.error(error_msg)
+                
+                # Check if it's a quota/rate limit error
+                if hasattr(e, 'resp') and e.resp.status in [429, 403]:
+                    if attempt < max_retries - 1:
+                        logger.info(f"Rate limit hit, waiting {retry_delay * (attempt + 1)} seconds before retry {attempt + 1}")
+                        import time
+                        time.sleep(retry_delay * (attempt + 1))
+                        continue
+                
+                return {"success": False, "error": error_msg}
+            
+            except Exception as e:
+                error_msg = f"Email send error: {e}"
+                logger.error(f"Attempt {attempt + 1} failed: {error_msg}")
+                
+                # Check for SSL/connection errors that can be retried
+                if any(ssl_error in str(e).lower() for ssl_error in [
+                    'eof occurred in violation of protocol', 
+                    'connection reset', 
+                    'ssl', 
+                    'timeout',
+                    'connection aborted'
+                ]):
+                    if attempt < max_retries - 1:
+                        logger.info(f"SSL/Connection error detected, retrying in {retry_delay} seconds... (attempt {attempt + 1}/{max_retries})")
+                        import time
+                        time.sleep(retry_delay)
+                        
+                        # Reinitialize service on SSL errors
+                        try:
+                            self._initialize_service()
+                        except Exception as init_error:
+                            logger.warning(f"Service reinitialization failed: {init_error}")
+                        
+                        continue
+                
+                # If it's not a retryable error, or we've exhausted retries
+                return {"success": False, "error": error_msg}
+        
+        return {"success": False, "error": f"Failed after {max_retries} attempts"}
     
     def send_bulk_emails(self, email_data_list: List[Dict[str, str]], 
-                        from_name: str, cv_path: str = None, 
+                        from_name: str, cv_path: str = "", 
                         delay_seconds: int = 5) -> List[Dict[str, Any]]:
         """Send emails to multiple professors with rate limiting."""
         
