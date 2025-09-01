@@ -1873,11 +1873,26 @@ def main():
                         st.warning("Please enter your name and research profile in settings!")
 
             with bulk_col2:
-                if st.button("📤 Send All Drafted Emails", type="secondary", help="Send all emails that have been drafted"):
-                    if st.session_state.get('user_name') and st.session_state.orchestrator and st.session_state.orchestrator.gmail_manager:
-                        # Show confirmation
-                        st.warning("⚠️ This will send ALL drafted emails. Are you sure?")
-                        if st.button("✅ Confirm Send All", type="primary", key="confirm_send_all"):
+                # Handle Send All Drafted with proper state management
+                if 'confirm_send_all' not in st.session_state:
+                    st.session_state.confirm_send_all = False
+                
+                if not st.session_state.confirm_send_all:
+                    if st.button("📤 Send All Drafted Emails", type="secondary", help="Send all emails that have been drafted"):
+                        if st.session_state.get('user_name') and st.session_state.orchestrator and st.session_state.orchestrator.gmail_manager:
+                            st.session_state.confirm_send_all = True
+                            st.rerun()
+                        elif not st.session_state.orchestrator or not st.session_state.orchestrator.gmail_manager:
+                            st.warning("Gmail not configured!")
+                        else:
+                            st.warning("Please enter your name in settings!")
+                else:
+                    # Show confirmation dialog
+                    st.warning("⚠️ This will send ALL drafted emails. Are you sure?")
+                    col_confirm, col_cancel = st.columns(2)
+                    
+                    with col_confirm:
+                        if st.button("✅ Confirm Send All", type="primary", key="confirm_send_yes"):
                             with st.spinner("Sending all drafted emails..."):
                                 try:
                                     user_name = st.session_state.get('user_name', '')
@@ -1887,23 +1902,41 @@ def main():
                                         st.success(f"✅ Sent {result['emails_sent']}/{result['total_emails']} emails")
                                         if result.get('failed_sends'):
                                             st.warning(f"⚠️ {len(result['failed_sends'])} emails failed to send")
-                                        st.rerun()
                                     else:
                                         st.error(f"❌ Bulk sending failed: {result.get('error')}")
                                 except Exception as e:
                                     st.error(f"❌ Error: {e}")
                                     logger.error(f"Bulk sending error: {e}")
-                    elif not st.session_state.orchestrator or not st.session_state.orchestrator.gmail_manager:
-                        st.warning("Gmail not configured!")
-                    else:
-                        st.warning("Please enter your name in settings!")
+                                finally:
+                                    st.session_state.confirm_send_all = False
+                                    st.rerun()
+                    
+                    with col_cancel:
+                        if st.button("❌ Cancel", key="send_cancel"):
+                            st.session_state.confirm_send_all = False
+                            st.rerun()
 
             with bulk_col3:
-                if st.button("🚀 Generate & Send All", type="primary", help="Generate emails for all verified professors and send immediately"):
-                    if st.session_state.get('user_name') and st.session_state.get('research_profile') and st.session_state.orchestrator and st.session_state.orchestrator.gmail_manager:
-                        # Show confirmation
-                        st.warning("⚠️ This will generate AND send ALL emails automatically. Are you sure?")
-                        if st.button("✅ Confirm Generate & Send All", type="primary", key="confirm_gen_send_all"):
+                # Handle Generate & Send All with proper state management
+                if 'confirm_gen_send_all' not in st.session_state:
+                    st.session_state.confirm_gen_send_all = False
+                
+                if not st.session_state.confirm_gen_send_all:
+                    if st.button("🚀 Generate & Send All", type="primary", help="Generate emails for all verified professors and send immediately"):
+                        if st.session_state.get('user_name') and st.session_state.get('research_profile') and st.session_state.orchestrator and st.session_state.orchestrator.gmail_manager:
+                            st.session_state.confirm_gen_send_all = True
+                            st.rerun()
+                        elif not st.session_state.orchestrator or not st.session_state.orchestrator.gmail_manager:
+                            st.warning("Gmail not configured!")
+                        else:
+                            st.warning("Please enter your name and research profile in settings!")
+                else:
+                    # Show confirmation dialog
+                    st.warning("⚠️ This will generate AND send ALL emails automatically. Are you sure?")
+                    col_confirm, col_cancel = st.columns(2)
+                    
+                    with col_confirm:
+                        if st.button("✅ Confirm Generate & Send All", type="primary", key="confirm_yes"):
                             with st.spinner("Generating and sending all emails..."):
                                 try:
                                     research_profile = st.session_state.get('research_profile', '')
@@ -1915,16 +1948,19 @@ def main():
                                         if result.get('failed_generations') or result.get('failed_sends'):
                                             failed_total = len(result.get('failed_generations', [])) + len(result.get('failed_sends', []))
                                             st.warning(f"⚠️ {failed_total} operations failed")
-                                        st.rerun()
                                     else:
                                         st.error(f"❌ Generate & send failed: {result.get('error')}")
                                 except Exception as e:
                                     st.error(f"❌ Error: {e}")
                                     logger.error(f"Generate & send error: {e}")
-                    elif not st.session_state.orchestrator or not st.session_state.orchestrator.gmail_manager:
-                        st.warning("Gmail not configured!")
-                    else:
-                        st.warning("Please enter your name and research profile in settings!")
+                                finally:
+                                    st.session_state.confirm_gen_send_all = False
+                                    st.rerun()
+                    
+                    with col_cancel:
+                        if st.button("❌ Cancel", key="confirm_cancel"):
+                            st.session_state.confirm_gen_send_all = False
+                            st.rerun()
 
             # Email stats
             st.markdown("---")
