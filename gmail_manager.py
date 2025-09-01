@@ -110,50 +110,46 @@ class GmailManager:
                            from_name: str, cv_path: str = "") -> MIMEMultipart:
         """Create email message with optional CV attachment and proper formatting."""
         
-        # Create message with alternative structure for better compatibility
-        message = MIMEMultipart('alternative')
-        message['to'] = to_email
-        message['subject'] = subject
-        
         # Ensure user_email is a string
         user_email = self.user_email if self.user_email else "unknown@example.com"
-        message['from'] = f"{from_name} <{user_email}>" if from_name else user_email
-        
-        # Add proper email headers for better authentication and deliverability
-        message['Reply-To'] = user_email
-        message['Return-Path'] = user_email
-        message['X-Mailer'] = 'PhD Outreach Agent v1.0'
-        message['X-Priority'] = '3'  # Normal priority
-        message['Message-ID'] = f"<{datetime.now().strftime('%Y%m%d%H%M%S')}.{hash(to_email + subject)}@{user_email.split('@')[1] if '@' in user_email else 'localhost'}>"
-        message['Date'] = datetime.now().strftime('%a, %d %b %Y %H:%M:%S %z')
         
         # Format the email body properly
         # Replace \\n\\n with actual line breaks for proper formatting
         formatted_body = body.replace('\\n\\n', '\n\n').replace('\\n', '\n')
         
-        # Create text and HTML versions
-        text_part = MIMEText(formatted_body, 'plain', 'utf-8')
-        html_part = MIMEText(self._format_body_as_html(formatted_body), 'html', 'utf-8')
-        
-        # Attach both versions to the alternative container
-        message.attach(text_part)
-        message.attach(html_part)
-        
-        # If CV attachment exists, wrap everything in a mixed multipart
+        # Create main message container
         if cv_path and os.path.exists(cv_path):
-            # Create new mixed message for attachments
-            mixed_message = MIMEMultipart('mixed')
+            # Use mixed for attachments
+            message = MIMEMultipart('mixed')
+        else:
+            # Use alternative for text/html
+            message = MIMEMultipart('alternative')
+        
+        # Set headers
+        message['to'] = to_email
+        message['subject'] = subject
+        message['from'] = f"{from_name} <{user_email}>" if from_name else user_email
+        message['Reply-To'] = user_email
+        message['Return-Path'] = user_email
+        message['X-Mailer'] = 'PhD Outreach Agent v1.0'
+        message['X-Priority'] = '3'  # Normal priority
+        message['Message-ID'] = f"<{datetime.now().strftime('%Y%m%d%H%M%S')}.{abs(hash(to_email + subject))}@{user_email.split('@')[1] if '@' in user_email else 'localhost'}>"
+        message['Date'] = datetime.now().strftime('%a, %d %b %Y %H:%M:%S %z')
+        
+        # Create text and HTML content
+        if cv_path and os.path.exists(cv_path):
+            # For attachments, create alternative container for text/html
+            alternative_container = MIMEMultipart('alternative')
             
-            # Copy headers to mixed message
-            for key, value in message.items():
-                mixed_message[key] = value
+            # Add text and HTML versions to alternative container
+            text_part = MIMEText(formatted_body, 'plain', 'utf-8')
+            html_part = MIMEText(self._format_body_as_html(formatted_body), 'html', 'utf-8')
             
-            # Remove headers from alternative message
-            for key in list(message.keys()):
-                del message[key]
+            alternative_container.attach(text_part)
+            alternative_container.attach(html_part)
             
-            # Attach the alternative message to mixed
-            mixed_message.attach(message)
+            # Attach alternative container to main message
+            message.attach(alternative_container)
             
             # Add CV attachment
             try:
@@ -166,14 +162,18 @@ class GmailManager:
                     'Content-Disposition',
                     f'attachment; filename="{os.path.basename(cv_path)}"'
                 )
-                mixed_message.attach(part)
+                message.attach(part)
                 logger.info(f"CV attached: {cv_path}")
-                
-                return mixed_message
                 
             except Exception as e:
                 logger.warning(f"Failed to attach CV: {e}")
-                return message
+        else:
+            # No attachment, just add text and HTML versions directly
+            text_part = MIMEText(formatted_body, 'plain', 'utf-8')
+            html_part = MIMEText(self._format_body_as_html(formatted_body), 'html', 'utf-8')
+            
+            message.attach(text_part)
+            message.attach(html_part)
         
         return message
     
@@ -216,9 +216,16 @@ class GmailManager:
                 # Create email message
                 message = self.create_email_message(to_email, subject, body, from_name, cv_path)
                 
-                # Convert to Gmail format
-                raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode('utf-8')
-                gmail_message = {'raw': raw_message}
+                # Convert to Gmail format with better error handling
+                try:
+                    message_bytes = message.as_bytes()
+                    raw_message = base64.urlsafe_b64encode(message_bytes).decode('utf-8')
+                    gmail_message = {'raw': raw_message}
+                except Exception as encoding_error:
+                    logger.error(f"Message encoding error: {encoding_error}")
+                    logger.error(f"Message type: {type(message)}")
+                    logger.error(f"Message headers: {list(message.keys())}")
+                    return {"success": False, "error": f"Message encoding failed: {encoding_error}"}
                 
                 # Send email
                 result = self.service.users().messages().send(
