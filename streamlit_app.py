@@ -810,6 +810,7 @@ class ResearchOrchestrator:
     def generate_bulk_emails_sync(self, user_research_profile: str, user_name: str, status_filter: str = "verified") -> Dict[str, Any]:
         """Generate emails for all professors matching criteria."""
         self.add_progress_message("📧 Starting bulk email generation...")
+        self.is_running = True
         
         try:
             conn = sqlite3.connect(self.db.db_path)
@@ -907,6 +908,8 @@ class ResearchOrchestrator:
             logger.error(error_msg)
             self.add_progress_message(f"❌ {error_msg}")
             return {"success": False, "error": str(e)}
+        finally:
+            self.is_running = False
         
 ###################################################################
 
@@ -917,6 +920,7 @@ class ResearchOrchestrator:
                 return {"success": False, "error": "Gmail not configured"}
 
             self.add_progress_message("📤 Starting bulk email sending...")
+            self.is_running = True
 
             try:
                 conn = sqlite3.connect(self.db.db_path)
@@ -1015,6 +1019,8 @@ class ResearchOrchestrator:
                 logger.error(f"Bulk email sending error: {e}")
                 self.add_progress_message(f"❌ Bulk sending error: {e}")
                 return {"success": False, "error": str(e)}
+            finally:
+                self.is_running = False
 
     def generate_and_send_all_sync(self, user_research_profile: str, user_name: str, cv_path: str = "uploaded_cv.pdf", delay_seconds: int = 10) -> Dict[str, Any]:
         """Generate emails for all verified professors and send them immediately."""
