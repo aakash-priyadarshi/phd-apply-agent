@@ -60,4 +60,7 @@ def load_settings(root: Path = APP_ROOT) -> Settings:
     data_dir = Path(configured).expanduser() if configured else root / "data"
     if not data_dir.is_absolute():
         data_dir = root / data_dir
-    return Settings(data_dir=data_dir.resolve())
+    resolved = data_dir.resolve()
+    if resolved.is_relative_to(root.resolve()) and not resolved.is_relative_to((root / "data").resolve()):
+        raise ValueError("PHD_AGENT_DATA_DIR inside the repository must be under ignored data/")
+    return Settings(data_dir=resolved)

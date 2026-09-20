@@ -1,6 +1,6 @@
 # PhD application and outreach console
 
-This is the existing local Streamlit application for CV analysis, professor discovery, email drafting and editing, and individual Gmail sends. The [2026–27 implementation plan](docs/implementation-plan-2026-27.md) describes its staged upgrade into an application and document CMS.
+This is a local Streamlit application with a manual application ledger and Document Vault. The earlier CV analysis, professor discovery, email drafting/editing, and individual Gmail sender remain available under **Legacy outreach**. The [2026–27 implementation plan](docs/implementation-plan-2026-27.md) describes the remaining staged work.
 
 ## Run locally
 
@@ -30,11 +30,26 @@ data/
   credentials.json
   gmail_token.json
   documents/uploaded_cv.pdf
+  documents/objects/<SHA-256 prefix>/<SHA-256>
   backups/phd_outreach-legacy*.db
   phd_outreach.log
 ```
 
-The app copies non-credential files from the old repository-root layout into `data/` on first run without overwriting newer local files. Before this upgrade, the existing database was copied byte-for-byte to `data/backups/` and its active copy was verified. Back up `data/` regularly. `PHD_AGENT_DATA_DIR` can point to another local directory; relative values are resolved from the repository root.
+The app copies non-credential files from the old repository-root layout into `data/` on first run without overwriting newer local files. Before this upgrade, the existing database was copied byte-for-byte to `data/backups/` and its active copy was verified. Back up `data/` regularly. `PHD_AGENT_DATA_DIR` can point to another local directory; relative values are resolved from the repository root. A custom directory inside the repository must be under the ignored `data/` tree.
+
+The application ledger uses additive SQLite migrations recorded in `schema_migrations`. Slice 1 adds the ledger and Vault tables without changing legacy professor rows. The ignored Slice 0 database backup remains available for rollback: stop the app, copy `data/backups/phd_outreach-legacy-1bcb632.db` to a separate location, and replace `data/phd_outreach.db` with that copy only if you intend to discard all Slice 1 records. Do not restore over a running app. Vault files under `data/documents/` need their own backup alongside the database.
+
+## Manual application workflow
+
+Open **Application CMS** in the sidebar. You can use it without an OpenAI key or Gmail authorization.
+
+1. Add an official source snapshot with its URL, excerpt, and verification state.
+2. Add a programme or opportunity, then create an application and record its next action.
+3. Add sourced application, funding, document, and referee deadlines. Add requirements with `FORMAL_APPLICATION`, `FACULTY_OUTREACH`, or `REPLY_REQUEST` context. Keep unresolved items `UNKNOWN`.
+4. Upload original files in **Document Vault**. Matching SHA-256 bytes show the existing version; source bytes are never overwritten. Review and approve a version, then link it to a matching requirement from the application detail screen. The same version can be linked to multiple applications.
+5. Add tasks and referees. The **Today** screen shows deadlines, missing required items, unknown requirements, overdue tasks, and document approval or expiry alerts.
+
+Administrative readiness is shown as separate counts: required items completed, unknown requirements, and conditional requirements. It is a document/process checklist, not an admission assessment. The application ledger is manual in this slice; it does not crawl programme sites, choose packages, generate documents, or submit forms. `PASSPORT` and `GOVERNMENT_ID` default to `HIGHLY_SENSITIVE` and are local-only. No cloud backend is active.
 
 The original root copies of the 2025 runtime files were removed from the working tree after verified local copies were made. Git still contains their earlier versions in history. This branch does **not** rewrite Git history.
 

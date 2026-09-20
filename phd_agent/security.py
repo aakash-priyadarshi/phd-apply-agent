@@ -23,6 +23,7 @@ def tracked_private_paths(root: Path = APP_ROOT) -> list[str]:
         lower = path.name.lower()
         if (
             path.parts[0].lower() == "data"
+            or "documents" in (part.lower() for part in path.parts)
             or lower.startswith("credentials") and lower.endswith(".json")
             or lower in {
                 "uploaded_cv.pdf", "research_profile.txt", ".env",

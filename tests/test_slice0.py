@@ -34,6 +34,16 @@ def test_auto_send_cannot_be_enabled_by_environment(tmp_path, monkeypatch):
     assert settings.auto_send_enabled is False
 
 
+def test_custom_data_dir_inside_repository_must_be_ignored(tmp_path, monkeypatch):
+    monkeypatch.setenv("PHD_AGENT_DATA_DIR", "unignored-runtime")
+    try:
+        load_settings(tmp_path)
+    except ValueError as error:
+        assert "ignored data/" in str(error)
+    else:
+        raise AssertionError("An unignored document store was accepted")
+
+
 def test_legacy_bulk_paths_never_call_gmail(monkeypatch):
     monkeypatch.setenv("AUTO_SEND_ENABLED", "true")
     orchestrator = streamlit_app.ResearchOrchestrator.__new__(streamlit_app.ResearchOrchestrator)

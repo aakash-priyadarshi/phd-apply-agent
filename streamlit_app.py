@@ -43,6 +43,7 @@ from dotenv import load_dotenv
 from phd_agent.config import load_settings
 from phd_agent.paths import ensure_data_layout
 from phd_agent.security import tracked_private_paths
+from phd_agent.ui import render_cms
 
 # Import Gmail manager
 try:
@@ -1380,6 +1381,11 @@ def main():
     if tracked:
         st.warning("Private runtime files are still tracked by Git: " + ", ".join(tracked))
 
+    workspace = st.sidebar.radio("Workspace", ["Application CMS", "Legacy outreach"])
+    if workspace == "Application CMS":
+        render_cms(SETTINGS.database_path)
+        return
+
     # Custom CSS styling
     st.markdown("""
     <style>
@@ -2100,6 +2106,21 @@ def main():
                                             st.warning("Please enter your name and research profile in settings!")
 
                                 elif prof['status'] == 'email_drafted':
+                                    with st.expander("✏️ Edit draft inline"):
+                                        with st.form(f"inline_edit_{prof['id']}"):
+                                            inline_subject = st.text_input(
+                                                "Edit subject", value=prof['draft_email_subject'] or '',
+                                                key=f"inline_subject_{prof['id']}")
+                                            inline_body = st.text_area(
+                                                "Edit body", value=(prof['draft_email_body'] or '').replace('\\n\\n', '\n\n').replace('\\n', '\n'),
+                                                key=f"inline_body_{prof['id']}")
+                                            if st.form_submit_button("Save draft changes"):
+                                                saved_body = inline_body.replace('\n\n', '\\n\\n').replace('\n', '\\n')
+                                                with sqlite3.connect(SETTINGS.database_path) as conn:
+                                                    conn.execute(
+                                                        "UPDATE professors SET draft_email_subject = ?, draft_email_body = ? WHERE id = ?",
+                                                        (inline_subject, saved_body, prof['id']))
+                                                st.rerun()
                                     # Show email preview button
                                     if st.button("👀 Preview Email", key=f"preview_{prof['id']}"):
                                         show_email_preview(prof)
