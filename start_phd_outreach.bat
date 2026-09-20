@@ -1,22 +1,8 @@
 @echo off
-title PhD Outreach Automation - 2-Stage System
-
-echo.
-echo ================================================
-echo  PhD Outreach Automation - 2-Stage System  
-echo ================================================
-echo.
-
-REM Activate virtual environment if it exists
-if exist "phd_outreach_env\Scripts\activate.bat" (
-    echo Activating virtual environment...
-    call phd_outreach_env\Scripts\activate.bat
+setlocal
+cd /d "%~dp0"
+if exist ".venv\Scripts\python.exe" (
+    ".venv\Scripts\python.exe" -m streamlit run streamlit_app.py --server.port 8501
+) else (
+    py -3 -m streamlit run streamlit_app.py --server.port 8501
 )
-
-echo Starting PhD Outreach System...
-echo Your browser will open automatically.
-echo.
-
-streamlit run streamlit_app.py --server.port 8501
-
-pause

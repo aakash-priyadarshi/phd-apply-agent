@@ -11,8 +11,9 @@ import logging
 import html
 from datetime import datetime
 from typing import Dict, List, Optional, Any
-import pickle
 from pathlib import Path
+
+from phd_agent.config import load_settings
 
 # Gmail API imports
 from google.oauth2.credentials import Credentials
@@ -32,9 +33,10 @@ logger = logging.getLogger(__name__)
 class GmailManager:
     """Manages Gmail API operations for sending PhD outreach emails."""
     
-    def __init__(self, credentials_file: str = "credentials.json"):
-        self.credentials_file = credentials_file
-        self.token_file = "gmail_token.pickle"
+    def __init__(self, credentials_file: str | None = None):
+        settings = load_settings()
+        self.credentials_file = credentials_file or str(settings.credentials_path)
+        self.token_file = str(settings.gmail_token_path)
         self.scopes = [
             'https://www.googleapis.com/auth/gmail.send',
             'https://www.googleapis.com/auth/gmail.readonly'
@@ -48,10 +50,13 @@ class GmailManager:
         try:
             creds = None
             
-            # Load existing token
+            # Legacy pickle tokens are deliberately never deserialized. Re-authenticate
+            # once to create a JSON token in the ignored data directory.
             if os.path.exists(self.token_file):
-                with open(self.token_file, 'rb') as token:
-                    creds = pickle.load(token)
+                try:
+                    creds = Credentials.from_authorized_user_file(self.token_file, self.scopes)
+                except (OSError, ValueError):
+                    logger.warning("Saved Gmail JSON token could not be loaded; reauthorization is required")
             
             # If there are no valid credentials, get them
             if not creds or not creds.valid:
@@ -71,9 +76,14 @@ class GmailManager:
                         self.credentials_file, self.scopes)
                     creds = flow.run_local_server(port=0)
                 
-                # Save credentials for next run
-                with open(self.token_file, 'wb') as token:
-                    pickle.dump(creds, token)
+                # Save credentials for next run without leaving a partial token file.
+                token_path = Path(self.token_file)
+                token_path.parent.mkdir(parents=True, exist_ok=True)
+                temporary = token_path.with_suffix(".json.tmp")
+                temporary.write_text(creds.to_json(), encoding="utf-8")
+                os.replace(temporary, token_path)
+                if os.name != "nt":
+                    token_path.chmod(0o600)
             
             # Build the service with credentials
             self.service = build('gmail', 'v1', credentials=creds, cache_discovery=False)
@@ -82,7 +92,7 @@ class GmailManager:
             profile = self.service.users().getProfile(userId='me').execute()
             self.user_email = profile.get('emailAddress', '')
             
-            logger.info(f"Gmail service initialized for: {self.user_email}")
+            logger.info("Gmail service initialized")
             return True
             
         except Exception as e:
@@ -291,6 +301,9 @@ class GmailManager:
                         from_name: str, cv_path: str = "", 
                         delay_seconds: int = 5) -> List[Dict[str, Any]]:
         """Send emails to multiple professors with rate limiting."""
+
+        if not load_settings().auto_send_enabled:
+            return [{"success": False, "error": "Bulk sending is disabled"} for _ in email_data_list]
         
         results = []
         
@@ -471,7 +484,7 @@ def create_bulk_email_data(professors_list: List[dict], user_name: str) -> List[
     return bulk_data
 
 
-def test_gmail_setup(credentials_file: str = "credentials.json") -> Dict[str, Any]:
+def test_gmail_setup(credentials_file: str | None = None) -> Dict[str, Any]:
     """Test Gmail setup and return status."""
     
     try:
@@ -516,7 +529,7 @@ if __name__ == "__main__":
     else:
         print(f"❌ Gmail setup failed: {test_result['error']}")
         print("\n📋 Troubleshooting steps:")
-        print("1. Ensure credentials.json exists in the current directory")
+        print("1. Ensure Gmail OAuth credentials exist in the local data directory")
         print("2. Make sure Gmail API is enabled in Google Cloud Console")
         print("3. Check that OAuth 2.0 credentials are correctly configured")
         print("4. Run the script and complete the authentication flow")

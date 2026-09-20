@@ -36,10 +36,13 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
-import pickle
 import PyPDF2
 from io import BytesIO
 from dotenv import load_dotenv
+
+from phd_agent.config import load_settings
+from phd_agent.paths import ensure_data_layout
+from phd_agent.security import tracked_private_paths
 
 # Import Gmail manager
 try:
@@ -51,14 +54,15 @@ except ImportError:
     GMAIL_AVAILABLE = False
 
 # Load environment variables
-load_dotenv()
+SETTINGS = load_settings()
+ensure_data_layout(SETTINGS.data_dir)
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('phd_outreach.log', encoding='utf-8'),
+        logging.FileHandler(SETTINGS.log_path, encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
@@ -350,8 +354,8 @@ class APIManager:
 class DatabaseManager:
     """Enhanced database manager with cost tracking."""
 
-    def __init__(self, db_path: str = "phd_outreach.db"):
-        self.db_path = db_path
+    def __init__(self, db_path: str | None = None):
+        self.db_path = db_path or str(SETTINGS.database_path)
         self.init_database()
 
     def init_database(self):
@@ -673,7 +677,8 @@ class NoWebDriverScraper:
 class ResearchOrchestrator:
     """Main orchestrator for the 2-stage research process."""
 
-    def __init__(self, openai_api_key: str, gmail_credentials: str = "credentials.json"):
+    def __init__(self, openai_api_key: str, gmail_credentials: str | None = None):
+        gmail_credentials = gmail_credentials or str(SETTINGS.credentials_path)
         self.api_manager = APIManager(openai_api_key)
         self.web_scraper = NoWebDriverScraper(self.api_manager)
         self.db = DatabaseManager()
@@ -913,8 +918,11 @@ class ResearchOrchestrator:
         
 ###################################################################
 
-    def send_bulk_emails_sync(self, user_name: str, cv_path: str = "uploaded_cv.pdf", delay_seconds: int = 10) -> Dict[str, Any]:
+    def send_bulk_emails_sync(self, user_name: str, cv_path: str = str(SETTINGS.cv_path), delay_seconds: int = 10) -> Dict[str, Any]:
             """Send all drafted emails with Gmail API."""
+
+            if not SETTINGS.auto_send_enabled:
+                return {"success": False, "error": "Bulk sending is disabled until the reviewed queue is implemented"}
             
             if not self.gmail_manager:
                 return {"success": False, "error": "Gmail not configured"}
@@ -1022,8 +1030,10 @@ class ResearchOrchestrator:
             finally:
                 self.is_running = False
 
-    def generate_and_send_all_sync(self, user_research_profile: str, user_name: str, cv_path: str = "uploaded_cv.pdf", delay_seconds: int = 10) -> Dict[str, Any]:
-        """Generate emails for all verified professors and send them immediately."""
+    def generate_and_send_all_sync(self, user_research_profile: str, user_name: str, cv_path: str = str(SETTINGS.cv_path), delay_seconds: int = 10) -> Dict[str, Any]:
+        """Generate and send in one step (disabled until reviewed queue exists)."""
+        if not SETTINGS.auto_send_enabled:
+            return {"success": False, "error": "Generate-and-send is disabled until the reviewed queue is implemented"}
         self.add_progress_message("🚀 Starting generate and send all process...")
 
         try:
@@ -1110,7 +1120,7 @@ class ResearchOrchestrator:
             self.add_progress_message(f"❌ Error generating email: {e}")
             return False
 
-    def send_single_email_sync(self, professor_id: int, user_name: str, cv_path: str = "uploaded_cv.pdf") -> bool:
+    def send_single_email_sync(self, professor_id: int, user_name: str, cv_path: str = str(SETTINGS.cv_path)) -> bool:
         """Send email for a single professor."""
         
         if not self.gmail_manager:
@@ -1279,7 +1289,7 @@ def show_email_edit_modal(professor_data):
                 # Convert line breaks back to escaped format for storage
                 saved_body = (edited_body or "").replace('\n\n', '\\n\\n').replace('\n', '\\n')
                 
-                conn = sqlite3.connect("phd_outreach.db")
+                conn = sqlite3.connect(SETTINGS.database_path)
                 cursor = conn.cursor()
                 cursor.execute('''
                     UPDATE professors 
@@ -1302,7 +1312,7 @@ def show_email_edit_modal(professor_data):
                 saved_body = (edited_body or "").replace('\n\n', '\\n\\n').replace('\n', '\\n')
                 
                 # First save the changes
-                conn = sqlite3.connect("phd_outreach.db")
+                conn = sqlite3.connect(SETTINGS.database_path)
                 cursor = conn.cursor()
                 cursor.execute('''
                     UPDATE professors 
@@ -1365,6 +1375,10 @@ def main():
         layout="wide",
         initial_sidebar_state="expanded"
     )
+
+    tracked = tracked_private_paths()
+    if tracked:
+        st.warning("Private runtime files are still tracked by Git: " + ", ".join(tracked))
 
     # Custom CSS styling
     st.markdown("""
@@ -1485,7 +1499,7 @@ def main():
     if 'research_profile' not in st.session_state:
         st.session_state.research_profile = ""
         # Try to load existing research profile on app start
-        research_profile_file = "research_profile.txt"
+        research_profile_file = SETTINGS.profile_path
         if os.path.exists(research_profile_file):
             try:
                 with open(research_profile_file, 'r', encoding='utf-8') as f:
@@ -1508,7 +1522,7 @@ def main():
         if openai_key:
             if st.session_state.orchestrator is None:
                 try:
-                    st.session_state.orchestrator = ResearchOrchestrator(openai_key, "credentials.json")
+                    st.session_state.orchestrator = ResearchOrchestrator(openai_key, str(SETTINGS.credentials_path))
                     st.success("✅ API connected!")
                 except Exception as e:
                     st.error(f"❌ Failed to initialize: {e}")
@@ -1554,8 +1568,8 @@ def main():
         cv_file = st.file_uploader("Upload your CV (PDF)", type=['pdf'])
 
         # Check if CV is already uploaded and analyzed
-        cv_exists = os.path.exists("uploaded_cv.pdf")
-        research_profile_file = "research_profile.txt"
+        cv_exists = SETTINGS.cv_path.exists()
+        research_profile_file = SETTINGS.profile_path
         
         if cv_exists:
             st.success("✅ CV already uploaded")
@@ -1579,7 +1593,7 @@ def main():
                     with st.spinner("Analyzing existing CV..."):
                         try:
                             # Read the existing CV file
-                            with open("uploaded_cv.pdf", 'rb') as cv_file:
+                            with SETTINGS.cv_path.open('rb') as cv_file:
                                 pdf_reader = PyPDF2.PdfReader(cv_file)
                                 cv_text = ""
                                 for page in pdf_reader.pages:
@@ -1615,7 +1629,7 @@ def main():
                             
                             # Save research profile to file for persistence
                             try:
-                                with open("research_profile.txt", 'w', encoding='utf-8') as f:
+                                with SETTINGS.profile_path.open('w', encoding='utf-8') as f:
                                     f.write(research_profile)
                                 st.success("✅ Research profile generated and saved!")
                                 st.rerun()
@@ -1637,7 +1651,7 @@ def main():
                                 cv_text += page.extract_text() + "\n"
 
                             # Save CV file
-                            with open("uploaded_cv.pdf", "wb") as f:
+                            with SETTINGS.cv_path.open("wb") as f:
                                 cv_file.seek(0)
                                 f.write(cv_file.read())
 
@@ -1671,7 +1685,7 @@ def main():
                             
                             # Save research profile to file for persistence
                             try:
-                                with open("research_profile.txt", 'w', encoding='utf-8') as f:
+                                with SETTINGS.profile_path.open('w', encoding='utf-8') as f:
                                     f.write(st.session_state.research_profile)
                             except Exception as e:
                                 st.warning(f"Could not save research profile: {e}")
@@ -1704,7 +1718,7 @@ def main():
                 st.caption(f"Email: {st.session_state.orchestrator.gmail_manager.user_email}")
             else:
                 st.markdown(f'<span class="gmail-status-disconnected">{gmail_status}</span>', unsafe_allow_html=True)
-                st.caption("Check credentials.json file")
+                st.caption("Place Gmail OAuth credentials in the local data directory")
 
         # User settings
         st.markdown("---")
@@ -1727,9 +1741,9 @@ def main():
         # Load and display target universities
         universities_to_research = []
 
-        if os.path.exists("PhD_Targets.csv"):
+        if SETTINGS.targets_path.exists():
             try:
-                df_targets = pd.read_csv("PhD_Targets.csv")
+                df_targets = pd.read_csv(SETTINGS.targets_path)
 
                 # University selection and management
                 for idx, row in df_targets.iterrows():
@@ -1747,7 +1761,7 @@ def main():
                         with col_c:
                             if st.button("🗑️ Remove", key=f"remove_{idx}"):
                                 df_targets = df_targets.drop(idx)
-                                df_targets.to_csv("PhD_Targets.csv", index=False)
+                                df_targets.to_csv(SETTINGS.targets_path, index=False)
                                 st.rerun()
 
                         if include:
@@ -1761,7 +1775,7 @@ def main():
             except Exception as e:
                 st.error(f"Error loading universities: {e}")
         else:
-            st.warning("PhD_Targets.csv not found. Please add universities below.")
+            st.warning("Target list not found. Please add universities below.")
 
         # Add new university
         st.subheader("➕ Add New University")
@@ -1783,13 +1797,13 @@ def main():
                             'Notes': new_notes
                         }])
 
-                        if os.path.exists("PhD_Targets.csv"):
-                            df_targets = pd.read_csv("PhD_Targets.csv")
+                        if SETTINGS.targets_path.exists():
+                            df_targets = pd.read_csv(SETTINGS.targets_path)
                             df_targets = pd.concat([df_targets, new_row], ignore_index=True)
                         else:
                             df_targets = new_row
 
-                        df_targets.to_csv("PhD_Targets.csv", index=False)
+                        df_targets.to_csv(SETTINGS.targets_path, index=False)
                         st.success("✅ University added!")
                         st.rerun()
                     except Exception as e:
@@ -1880,11 +1894,12 @@ def main():
 
             with bulk_col2:
                 # Handle Send All Drafted with proper state management
+                st.caption("Bulk sending is unavailable until reviewed outreach packages are implemented.")
                 if 'confirm_send_all' not in st.session_state:
                     st.session_state.confirm_send_all = False
                 
                 if not st.session_state.confirm_send_all:
-                    if st.button("📤 Send All Drafted Emails", type="secondary", help="Send all emails that have been drafted"):
+                    if st.button("📤 Send All Drafted Emails", type="secondary", disabled=True, help="Reviewed sending queue is not implemented yet"):
                         if st.session_state.get('user_name') and st.session_state.orchestrator and st.session_state.orchestrator.gmail_manager:
                             st.session_state.confirm_send_all = True
                             st.rerun()
@@ -1898,7 +1913,7 @@ def main():
                     col_confirm, col_cancel = st.columns(2)
                     
                     with col_confirm:
-                        if st.button("✅ Confirm Send All", type="primary", key="confirm_send_yes"):
+                        if st.button("✅ Confirm Send All", type="primary", key="confirm_send_yes", disabled=True):
                             with st.spinner("Sending all drafted emails..."):
                                 try:
                                     user_name = st.session_state.get('user_name', '')
@@ -1928,7 +1943,7 @@ def main():
                     st.session_state.confirm_gen_send_all = False
                 
                 if not st.session_state.confirm_gen_send_all:
-                    if st.button("🚀 Generate & Send All", type="primary", help="Generate emails for all verified professors and send immediately"):
+                    if st.button("🚀 Generate & Send All", type="primary", disabled=True, help="Reviewed sending queue is not implemented yet"):
                         if st.session_state.get('user_name') and st.session_state.get('research_profile') and st.session_state.orchestrator and st.session_state.orchestrator.gmail_manager:
                             st.session_state.confirm_gen_send_all = True
                             st.rerun()
@@ -1942,7 +1957,7 @@ def main():
                     col_confirm, col_cancel = st.columns(2)
                     
                     with col_confirm:
-                        if st.button("✅ Confirm Generate & Send All", type="primary", key="confirm_yes"):
+                        if st.button("✅ Confirm Generate & Send All", type="primary", key="confirm_yes", disabled=True):
                             with st.spinner("Generating and sending all emails..."):
                                 try:
                                     research_profile = st.session_state.get('research_profile', '')
@@ -2263,4 +2278,4 @@ if __name__ == "__main__":
 
 
 if __name__ == "__main__":
-    main()        
+    main()

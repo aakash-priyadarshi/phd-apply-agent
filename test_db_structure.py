@@ -4,12 +4,13 @@ Test script to verify database structure and cost tracking
 """
 import sqlite3
 import sys
+from phd_agent.config import load_settings
 
 def check_database_structure():
     """Check the database structure and see what columns exist."""
     try:
         # Connect to database
-        conn = sqlite3.connect("phd_outreach.db")
+        conn = sqlite3.connect(load_settings().database_path)
         cursor = conn.cursor()
         
         print("=== DATABASE STRUCTURE CHECK ===")
