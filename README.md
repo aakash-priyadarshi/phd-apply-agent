@@ -1,6 +1,6 @@
 # PhD application and outreach console
 
-This is a local Streamlit application with a manual application ledger and Document Vault. The earlier CV analysis, professor discovery, email drafting/editing, and individual Gmail sender remain available under **Legacy outreach**. The [2026–27 implementation plan](docs/implementation-plan-2026-27.md) describes the remaining staged work.
+This is a local Streamlit application with an application ledger, Document Vault, versioned applicant truth library, research directions, and source-backed discovery. The earlier CV analysis, professor discovery, email drafting/editing, and individual Gmail sender remain available under **Legacy outreach**. The [2026–27 implementation plan](docs/implementation-plan-2026-27.md) describes the staged work.
 
 ## Run locally
 
@@ -37,7 +37,7 @@ data/
 
 The app copies non-credential files from the old repository-root layout into `data/` on first run without overwriting newer local files. Before this upgrade, the existing database was copied byte-for-byte to `data/backups/` and its active copy was verified. Back up `data/` regularly. `PHD_AGENT_DATA_DIR` can point to another local directory; relative values are resolved from the repository root. A custom directory inside the repository must be under the ignored `data/` tree.
 
-The application ledger uses additive SQLite migrations recorded in `schema_migrations`. Slice 1 adds the ledger and Vault tables without changing legacy professor rows. The ignored Slice 0 database backup remains available for rollback: stop the app, copy `data/backups/phd_outreach-legacy-1bcb632.db` to a separate location, and replace `data/phd_outreach.db` with that copy only if you intend to discard all Slice 1 records. Do not restore over a running app. Vault files under `data/documents/` need their own backup alongside the database.
+The application ledger uses additive SQLite migrations recorded in `schema_migrations`. Slice 2 adds profile, claim, research track, catalogue, faculty verification, publication, and assessment tables without changing legacy professor rows. The approved Slice 1 baseline is backed up under `data/backups/phd_outreach-slice1-eefd5b8c.db`. Stop the app before any restore and keep a separate copy of the current database first; restoring the baseline discards later local work. Vault files under `data/documents/` need their own backup alongside the database.
 
 ## Manual application workflow
 
@@ -49,7 +49,19 @@ Open **Application CMS** in the sidebar. You can use it without an OpenAI key or
 4. Upload original files in **Document Vault**. Matching SHA-256 bytes show the existing version; source bytes are never overwritten. Review and approve a version, then link it to a matching requirement from the application detail screen. The same version can be linked to multiple applications.
 5. Add tasks and referees. The **Today** screen shows deadlines, missing required items, unknown requirements, overdue tasks, and document approval or expiry alerts.
 
-Administrative readiness is shown as separate counts: required items completed, unknown requirements, and conditional requirements. It is a document/process checklist, not an admission assessment. The application ledger is manual in this slice; it does not crawl programme sites, choose packages, generate documents, or submit forms. `PASSPORT` and `GOVERNMENT_ID` default to `HIGHLY_SENSITIVE` and are local-only. No cloud backend is active.
+Administrative readiness is shown as separate counts: required items completed, unknown requirements, and conditional requirements. It is a document/process checklist, not an admission assessment. `PASSPORT` and `GOVERNMENT_ID` default to `HIGHLY_SENSITIVE` and are local-only. No cloud backend is active.
+
+## Applicant truth and discovery workflow
+
+The **Applicant Truth** tab imports approved local CV/PDF/DOCX source versions, reads every PDF page or DOCX paragraph/table, and optionally calls OpenAI typed structured output to create *pending* claim candidates. Model extraction requires `OPENAI_API_KEY`; manual claims work without it. The existing local CV was imported into the Vault as a **pending** source, and its manually seeded claim candidates remain pending. Review the CV source version, inspect each claim and its page/location, correct wording and classification, then approve it for application and outreach independently. FACT and INFERENCE claims need linked evidence; facts need a verified review state. Approved profile snapshots preserve exact claim revisions and cannot be edited.
+
+The **Research Directions** tab holds draft or approved versions of proposed PhD directions. An approved version is immutable; editing makes a new draft version. Attach approved claims where a direction relies on past experience. Draft directions do not prove applicant expertise.
+
+The **Discovery** tab manages target institution states, official source URLs, evidence snapshots, opportunities, professors, and OpenAlex publications. Historical targets start as `CONSIDERING`, and all 156 historical professor rows were copied into separate `NEEDS_REVERIFICATION` faculty profiles. An old LLM score never upgrades a verification state. Static source pages are fetched and hashed when possible; manual snapshots retain a reviewed excerpt when a site blocks simple HTTP fetching. Source evidence and verification events are append-only. Evidence freshness is a review interval: 45 days for faculty affiliation/email, 3 for openings, 7 for deadlines, 14 for requirements/contact policy, and 30 for publication context.
+
+Search or enter an official programme, faculty, lab, or vacancy page; snapshot it; then review any candidate before adding a faculty profile or opportunity. `OPEN`, `CLOSED`, and `UNKNOWN` opportunity states are separate from publication activity. OpenAlex author search is available after institutional identity review; an operator must choose the author after comparing name, affiliation, subject area, and works. Independent publication pages can be linked when OpenAlex affiliation metadata is noisy. A paper never establishes a current opening. Discoveries can link to the application ledger, and conflicting programme, opportunity, deadline, or requirement data creates a review task instead of overwriting entered values. Research Fit and Application Readiness remain separate nullable fields with explicit unknowns.
+
+The ten-record pilot is reproducible with `python -m scripts.slice2_pilot --apply` after reviewing the linked official pages. The command is idempotent for records already reviewed. It creates draft research directions and one Stanford programme application opportunity, but no application, email, or submission. The remaining historical professor records require controlled review. This slice does not generate tailored CVs, SOPs, proposals, emails, or portal submissions.
 
 The original root copies of the 2025 runtime files were removed from the working tree after verified local copies were made. Git still contains their earlier versions in history. This branch does **not** rewrite Git history.
 

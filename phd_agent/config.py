@@ -5,10 +5,23 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Mapping
 
 from dotenv import load_dotenv
 
 from phd_agent.paths import APP_ROOT
+
+
+# Review intervals are prompts to recheck sources, not guarantees of truth.
+FRESHNESS_DAYS: Mapping[str, int] = {
+    "FACULTY_AFFILIATION": 45,
+    "FACULTY_EMAIL": 45,
+    "OPPORTUNITY_OPENING": 3,
+    "DEADLINE": 7,
+    "PROGRAMME_REQUIREMENT": 14,
+    "CONTACT_POLICY": 14,
+    "PUBLICATION": 30,
+}
 
 
 @dataclass(frozen=True)

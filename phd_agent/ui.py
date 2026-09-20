@@ -572,14 +572,24 @@ def render_vault(vault: DocumentVault):
 
 
 def render_cms(db_path: Path):
+    from phd_agent.ui_slice2 import render_discovery, render_tracks, render_truth
+
     ledger = Ledger(db_path)
     vault = DocumentVault(db_path)
     st.title("PhD applications")
-    st.caption("Manual 2026–27 application ledger and local Document Vault")
-    today, applications, documents = st.tabs(["Today", "Applications", "Document Vault"])
+    st.caption("Local application ledger, Document Vault, applicant truth, and reviewed discovery")
+    today, applications, documents, truth, tracks, discovery = st.tabs([
+        "Today", "Applications", "Document Vault", "Applicant Truth", "Research Directions", "Discovery",
+    ])
     with today:
         render_today(ledger)
     with applications:
         render_applications(ledger, vault)
     with documents:
         render_vault(vault)
+    with truth:
+        render_truth(db_path)
+    with tracks:
+        render_tracks(db_path)
+    with discovery:
+        render_discovery(db_path)

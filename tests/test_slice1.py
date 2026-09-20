@@ -23,6 +23,7 @@ def legacy_copy(tmp_path):
     with sqlite3.connect(original) as db:
         db.execute("""CREATE TABLE professors (
             id INTEGER PRIMARY KEY, name TEXT NOT NULL, university TEXT NOT NULL,
+            department TEXT, email TEXT, research_interests TEXT, profile_url TEXT,
             status TEXT DEFAULT 'pending', draft_email_body TEXT)""")
         db.execute("CREATE TABLE cost_tracking (id INTEGER PRIMARY KEY, total_cost REAL)")
         db.execute("CREATE TABLE sent_emails (id INTEGER PRIMARY KEY, professor_id INTEGER)")
@@ -40,7 +41,7 @@ def test_migration_preserves_156_legacy_professors_and_is_idempotent(legacy_copy
     with connect(legacy_copy) as db:
         old_rows = [tuple(r) for r in db.execute("SELECT * FROM professors ORDER BY id")]
         old_schema = db.execute("SELECT sql FROM sqlite_master WHERE name = 'professors'").fetchone()[0]
-    assert migrate(legacy_copy) == [1, 2]
+    assert migrate(legacy_copy) == [1, 2, 3, 4]
     assert migrate(legacy_copy) == []
     with connect(legacy_copy) as db:
         assert [tuple(r) for r in db.execute("SELECT * FROM professors ORDER BY id")] == old_rows
@@ -266,3 +267,50 @@ def test_task_and_application_crud_on_empty_application(tmp_path):
     ledger.delete_task(task)
     ledger.delete_application(app)
     assert ledger.get("applications", app) is None
+
+
+def test_complete_slice1_manual_acceptance_path(tmp_path):
+    """One temporary application carries every approved Slice 1 acceptance item."""
+    path = tmp_path / "acceptance.db"
+    ledger, vault = Ledger(path), DocumentVault(path)
+    source = ledger.create_evidence(
+        "https://example.edu/graduate/doctoral", "ADMISSIONS",
+        "Synthetic official-style checklist fixture", "VERIFIED",
+    )
+    programme = ledger.create_programme(
+        "Example University", "PhD Computer Science",
+        programme_url="https://example.edu/graduate/doctoral",
+    )
+    app = ledger.create_application(
+        "2026–27", programme_id=programme,
+        next_action="Confirm language waiver and request third reference",
+    )
+    ledger.create_deadline(app, "APPLICATION", "2027-01-15", source, timezone="Europe/London")
+    transcript_requirement = ledger.create_requirement(
+        app, "FORMAL_APPLICATION", "REQUIRED", "MSc transcript", source,
+        normalized_document_type="TRANSCRIPT",
+    )
+    ledger.create_requirement(
+        app, "FORMAL_APPLICATION", "REQUIRED", "Research proposal", source,
+        normalized_document_type="RESEARCH_PROPOSAL",
+    )
+    ledger.create_requirement(
+        app, "FORMAL_APPLICATION", "UNKNOWN", "English language evidence", source,
+        normalized_document_type="ENGLISH_TEST",
+        condition_text="Waiver applicability unresolved",
+    )
+    ledger.create_task(app, "VERIFY", "Check language waiver", due_at="2026-10-01")
+    document = vault.upload(
+        b"synthetic transcript fixture", "transcript.pdf", "SOURCE", "TRANSCRIPT",
+        "Sample MSc transcript",
+    )
+    vault.set_approval(document["version_id"], True, "Test operator")
+    vault.link_to_application(app, transcript_requirement, document["version_id"])
+    assert ledger.get("applications", app)["next_action"]
+    assert ledger.list_deadlines(app)[0]["source_url"] == "https://example.edu/graduate/doctoral"
+    assert len(ledger.list_tasks(app)) == 1
+    assert {r["document_state"] for r in ledger.requirement_rows(app)} == {"AVAILABLE", "MISSING"}
+    assert ledger.readiness(app) == {
+        "required_complete": 1, "required_total": 2,
+        "unknown_requirements": 1, "conditional_requirements": 1,
+    }

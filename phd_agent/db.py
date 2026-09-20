@@ -265,9 +265,14 @@ VERSION_METADATA_SCHEMA = (
         permitted_storage_policy = (SELECT permitted_storage_policy FROM documents WHERE id = document_versions.document_id)""",
 )
 
+from phd_agent.migrations.slice2 import SCHEMA as SLICE_2_SCHEMA, INTEGRITY_TRIGGERS, seed_historical_faculty
+
+
 MIGRATIONS = (
     (1, "slice_1_application_ledger_and_document_vault", SLICE_1_SCHEMA),
     (2, "slice_1_version_metadata_snapshot", VERSION_METADATA_SCHEMA),
+    (3, "slice_2_applicant_truth_and_discovery", (*SLICE_2_SCHEMA, seed_historical_faculty)),
+    (4, "slice_2_immutable_review_history", INTEGRITY_TRIGGERS),
 )
 
 
@@ -291,7 +296,10 @@ def migrate(path: Path | str) -> list[int]:
             if version in existing:
                 continue
             for statement in statements:
-                db.execute(statement)
+                if callable(statement):
+                    statement(db)
+                else:
+                    db.execute(statement)
             db.execute(
                 "INSERT INTO schema_migrations(version, name, applied_at) VALUES (?, ?, ?)",
                 (version, name, utc_now()),
