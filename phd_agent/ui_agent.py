@@ -10,7 +10,7 @@ from pathlib import Path
 import streamlit as st
 
 from phd_agent.applicant_context import ApplicantResearchContextService
-from phd_agent.browser_worker import FormPlanService, LocalPlaywrightWorker, fields_from_html
+from phd_agent.browser_worker import FormPlanService, LocalPlaywrightWorker, companion_command, fields_from_html
 from phd_agent.config import load_settings
 from phd_agent.db import connect
 from phd_agent.discovery import Discovery
@@ -28,9 +28,7 @@ NAVIGATION = (
 
 
 def _companion_command(plan_id: int, platform_name: str | None = None) -> tuple[str, str]:
-    if (platform_name or os.name) == "nt":
-        return f".\\.venv\\Scripts\\python.exe -m scripts.browser_companion {plan_id}", "powershell"
-    return f"./.venv/bin/python -m scripts.browser_companion {plan_id}", "bash"
+    return companion_command(plan_id, platform_name)
 
 
 def _styles() -> None:

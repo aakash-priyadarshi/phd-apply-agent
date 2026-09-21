@@ -25,6 +25,10 @@ from phd_agent.matching import contact_policy_state
 from phd_agent.model_router import ModelRouter
 from phd_agent.official_search import OfficialSearchProvider, OpenAIOfficialSearchProvider
 from phd_agent.packages import PackageBuilder
+from phd_agent.university_enrichment import (
+    QS_SOURCE_URL, candidate_matches_filters, enrich_university, enrichment_payload,
+    parse_preference_filters,
+)
 
 
 USER_AGENT = "PhD-Application-Agent/1.0 (+operator-supervised programme review)"
@@ -140,16 +144,16 @@ class ProgrammeOrchestrator:
             raise ValueError("Describe the research area, cycle, funding need, or target region")
         self.contexts.get(context_id)
         retrieval = self.contexts.retrieve(context_id, "DISCOVERY_QUERY", intent, top_k=6,
-                                           use="application", include_proposed=True)
+                                           use="exploration", include_proposed=True)
         inferred = sorted({term for item in retrieval.items for term in item.matched_terms})
-        parsed_filters = {
+        parsed_filters = parse_preference_filters(intent, {
             "years": sorted(set(re.findall(r"\b20\d{2}\b", intent))),
             "funded_only": bool(re.search(r"\bfunded|funding|scholarship|studentship\b", intent, re.I)),
             "regions": [region for region in ("UK", "Europe", "US", "Canada", "Australia", "Singapore")
                         if re.search(rf"\b{re.escape(region)}\b", intent, re.I)],
             "context_terms": inferred,
             **(filters or {}),
-        }
+        })
         with transaction(self.db_path) as db:
             intent_id = db.execute("""INSERT INTO discovery_intents
                 (intent_text,filters_json,applicant_context_id,created_at) VALUES(?,?,?,?)""",
@@ -204,6 +208,7 @@ class ProgrammeOrchestrator:
                 "research_area": row["research_area"], "opening_status": row["opening_status"],
                 "existing_programme_id": row["id"], "existing_opportunity_id": row["opportunity_id"],
                 "unknown_fields": ["deadline", "fees", "required_documents"],
+                **enrichment_payload(enrich_university(row["university"])),
             }
             field_evidence = {key: {"state": "VERIFIED" if row.get("verification_state") == "VERIFIED" else "UNCERTAIN",
                                     "excerpt": "Existing reviewed ledger record"}
@@ -220,7 +225,7 @@ class ProgrammeOrchestrator:
         intent = self._intent(intent_id)
         retrieval = self.contexts.retrieve(
             intent["applicant_context_id"], "DISCOVERY_PLANNING", intent["intent_text"],
-            top_k=6, use="application", include_proposed=True,
+            top_k=6, use="exploration", include_proposed=True,
         )
         route = ModelRouter().route("DISCOVERY_PLANNING")
         search = provider or OpenAIOfficialSearchProvider(api_key)
@@ -441,10 +446,11 @@ class ProgrammeOrchestrator:
                 contact_policy = "CONTACT_ALLOWED"
         fit_query = " ".join(filter(None, (programme, degree, department, text[:4000])))
         retrieval = self.contexts.retrieve(context_id, "PROGRAMME_TRIAGE", fit_query,
-                                           top_k=3, use="application", include_proposed=True)
+                                           top_k=3, use="exploration", include_proposed=True)
         demonstrated = [item for item in retrieval.items if item.classification == "DEMONSTRATED"]
         proposed = [item for item in retrieval.items if item.classification == "PROPOSED"]
         fit_score = round(min(10, sum(item.score for item in retrieval.items) / max(1, len(retrieval.items)) / 2), 1)
+        university_match = enrich_university(university or host_label, page_text=text)
         payload = {
             "university": university or None, "department": department,
             "programme": programme or degree, "degree": degree,
@@ -461,6 +467,7 @@ class ProgrammeOrchestrator:
             "proposed_overlap": [item.text for item in proposed],
             "relevant_applicant_experience": [item.text for item in retrieval.items],
             "context_retrieval_id": retrieval.id,
+            **enrichment_payload(university_match),
         }
         important = ("university", "programme", "deadline", "funding", "eligibility", "fees",
                      "english_requirements", "required_documents", "referee_count", "supervisor_contact_policy")
@@ -481,6 +488,13 @@ class ProgrammeOrchestrator:
             "supervisor_contact_policy": {"state": "EXTRACTED" if contact_policy != "UNKNOWN" else "UNKNOWN", "excerpt": contact_text},
             "applicant_context": {"state": "APPROVED", "retrieval_id": retrieval.id,
                                   "claim_revision_ids": list(retrieval.claim_revision_ids)},
+            "country": {"state": "EXTRACTED" if university_match.country else "UNKNOWN",
+                        "excerpt": university_match.country or "", "source": university_match.country_source,
+                        "match_state": university_match.country_match_state},
+            "qs_rank": {"state": "CATALOG" if university_match.qs_match_state in {"EXACT", "ALIAS_MATCH"} else "UNKNOWN",
+                        "excerpt": university_match.qs_rank_display or "",
+                        "match_state": university_match.qs_match_state,
+                        "source_url": university_match.qs_source_url},
         }
         extracted_count = sum(value["state"] in {"EXTRACTED", "APPROVED"} for value in field_evidence.values())
         confidence = round(extracted_count / len(field_evidence), 2)
@@ -540,7 +554,8 @@ class ProgrammeOrchestrator:
         return result
 
     def list_candidates(self, *, intent_id: int | None = None,
-                        states: tuple[str, ...] = ("NEW", "SHORTLISTED")) -> list[dict]:
+                        states: tuple[str, ...] = ("NEW", "SHORTLISTED"),
+                        extra_filters: dict | None = None) -> list[dict]:
         clauses, args = [], []
         if intent_id is not None:
             clauses.append("intent_id=?")
@@ -551,7 +566,21 @@ class ProgrammeOrchestrator:
         sql = "SELECT id FROM programme_candidates" + (" WHERE " + " AND ".join(clauses) if clauses else "") + " ORDER BY id DESC"
         with connect(self.db_path) as db:
             ids = [row["id"] for row in db.execute(sql, args)]
-        return [self.get_candidate(candidate_id) for candidate_id in ids]
+        items = [self.get_candidate(candidate_id) for candidate_id in ids]
+        result = []
+        for item in items:
+            filters = {}
+            if item.get("intent_id"):
+                try:
+                    filters.update(self._intent(item["intent_id"])["filters"])
+                except ValueError:
+                    pass
+            if extra_filters:
+                filters.update({key: value for key, value in extra_filters.items()
+                                if value not in (None, "", [], "Any")})
+            if candidate_matches_filters(item["payload"], filters):
+                result.append(item)
+        return result
 
     def review_candidate(self, candidate_id: int, decision: str, reviewer: str) -> None:
         decision = decision.strip().upper()
@@ -615,6 +644,22 @@ class ProgrammeOrchestrator:
             original_source["canonical_url"], original_source["source_type"],
             original_source["relevant_excerpt"], "VERIFIED", last_manually_verified_at=utc_now())
         programme_id = payload.get("existing_programme_id")
+        enrichment = {
+            key: payload.get(key) for key in (
+                "country", "country_code", "country_source", "country_match_state",
+                "qs_ranking_system", "qs_ranking_year", "qs_rank_display", "qs_rank_numeric",
+                "qs_rank_band_low", "qs_rank_band_high", "qs_source_url", "qs_match_state",
+            ) if payload.get(key) not in (None, "")
+        }
+        if enrichment.get("qs_match_state") in {"EXACT", "ALIAS_MATCH"}:
+            enrichment["qs_checked_at"] = utc_now()
+            rank_excerpt = (
+                f"QS World University Rankings {payload.get('qs_ranking_year')}: "
+                f"{payload['university']} is listed as {payload.get('qs_rank_display')}."
+            )
+            enrichment["qs_source_evidence_id"] = self.ledger.create_evidence(
+                payload.get("qs_source_url") or QS_SOURCE_URL, "QS_RANKING", rank_excerpt,
+                "UNVERIFIED")
         if not programme_id:
             programme_id = self.ledger.create_programme(
                 payload["university"], payload["programme"], department=payload.get("department"),
@@ -622,7 +667,10 @@ class ProgrammeOrchestrator:
                 programme_url=candidate["canonical_url"], admissions_url=candidate["canonical_url"],
                 portal_url=payload.get("official_application_url"),
                 notes=f"Accepted from programme candidate #{candidate_id}; evidence #{source}",
+                **enrichment,
             )
+        elif enrichment:
+            self.ledger.update_programme(programme_id, **enrichment)
         opportunity_id = payload.get("existing_opportunity_id")
         if not opportunity_id:
             contact_evidence = candidate["field_evidence"].get("supervisor_contact_policy", {})
@@ -719,7 +767,7 @@ class ProgrammeOrchestrator:
             query = detail_text + " " + " ".join((paper["title"] + " " + (paper["abstract_text"] or ""))
                                                     for paper in verified_publications)
             retrieval = self.contexts.retrieve(context_id, "FACULTY_ALIGNMENT", query,
-                                               top_k=3, use="outreach", include_proposed=True)
+                                               top_k=3, use="exploration", include_proposed=True)
             demonstrated = [item for item in retrieval.items if item.classification == "DEMONSTRATED"]
             proposed = [item for item in retrieval.items if item.classification == "PROPOSED"]
             evidence_ids = sorted({link["id"] for link in links if link["verification_state"] == "VERIFIED"})
@@ -764,7 +812,7 @@ class ProgrammeOrchestrator:
             track.get("proposed_methodology"), "relevant supervisors and faculty",
         )))
         retrieval = self.contexts.retrieve(context_id, "FACULTY_SYNTHESIS", query,
-                                           top_k=6, use="application", include_proposed=True)
+                                           top_k=6, use="exploration", include_proposed=True)
         route = ModelRouter().route("FACULTY_SYNTHESIS")
         search = provider or OpenAIOfficialSearchProvider(api_key)
         hits = search.search(query, tuple(item.text for item in retrieval.items), route, purpose="FACULTY")
@@ -842,6 +890,10 @@ class ProgrammeOrchestrator:
         package = overview["latest_package"]
         blockers = []
         build_error = None
+        if context_id:
+            context = self.contexts.get(context_id)
+            if context.get("trust_level") != "TRUSTED":
+                blockers.append("Confirm your profile with Use this profile before preparing application documents")
         readiness = overview["readiness"]
         if readiness["required_complete"] < readiness["required_total"]:
             blockers.append("Required documents are incomplete")

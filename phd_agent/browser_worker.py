@@ -14,6 +14,64 @@ from bs4 import BeautifulSoup
 from phd_agent.db import connect, migrate, transaction, utc_now
 
 
+def companion_command(plan_id: int, platform_name: str | None = None) -> tuple[str, str]:
+    import os
+    if (platform_name or os.name) == "nt":
+        return f".\\.venv\\Scripts\\python.exe -m scripts.browser_companion {plan_id}", "powershell"
+    return f"./.venv/bin/python -m scripts.browser_companion {plan_id}", "bash"
+
+
+def _css_escape(value: str) -> str:
+    return (value or "").replace("\\", "\\\\").replace("'", "\\'")
+
+
+def _normalized_label(value: str) -> str:
+    return re.sub(r"\W+", " ", (value or "").casefold()).strip()
+
+
+def build_field_locator(*, tag: str, element_id: str | None, name: str | None,
+                        aria_label: str | None, tag_index: int,
+                        accessible_label: str | None = None) -> str:
+    if element_id:
+        return f"#{_css_escape(element_id)}"
+    label = (accessible_label or "").strip()
+    if label and not _normalized_label(label).startswith("field"):
+        return f"get-by-label:{label}"
+    if name:
+        return f"{tag}[name='{_css_escape(name)}']"
+    if aria_label:
+        return f"{tag}[aria-label='{_css_escape(aria_label)}']"
+    return f"xpath=(//{tag})[{max(1, tag_index)}]"
+
+
+def playwright_locator(page, locator: str):
+    if locator.startswith("get-by-label:"):
+        return page.get_by_label(locator.split(":", 1)[1], exact=False)
+    return page.locator(locator)
+
+
+def _wrapping_label_text(node) -> str:
+    wrapping = node.find_parent("label") if hasattr(node, "find_parent") else None
+    if wrapping is None:
+        return ""
+    parts = []
+    for child in wrapping.contents:
+        name = getattr(child, "name", None)
+        if name in {"input", "textarea", "select", "button"}:
+            continue
+        text = child.get_text(" ", strip=True) if hasattr(child, "get_text") else str(child).strip()
+        if text:
+            parts.append(text)
+    return " ".join(parts)
+
+
+def labels_match(expected: str, actual: str) -> bool:
+    left, right = _normalized_label(expected), _normalized_label(actual)
+    if not left or left.startswith("field "):
+        return True
+    return bool(right) and (left in right or right in left)
+
+
 SENSITIVE_KEYS = {"PASSWORD", "MFA_CODE", "PAYMENT", "PASSPORT", "GOVERNMENT_ID"}
 NARRATIVE_KEYS = {"RESEARCH_INTERESTS", "AWARDS", "PUBLICATIONS_SUMMARY", "FUNDING_STATEMENT", "OTHER"}
 LABEL_MAP = (
@@ -106,16 +164,27 @@ class LocalPlaywrightWorker:
             browser = api.chromium.launch(headless=False)
             page = browser.new_page()
             page.goto(url, wait_until="domcontentloaded")
+            tag_counts: dict[str, int] = {}
             for index, node in enumerate(page.locator("input, textarea, select").all()):
                 tag_name = node.evaluate("el => el.tagName.toLowerCase()")
                 input_type = node.get_attribute("type") or ("text" if tag_name == "input" else tag_name)
                 if input_type in {"hidden", "submit", "button"}:
                     continue
                 node_id = node.get_attribute("id")
-                label = page.locator(f"label[for='{node_id}']").first.inner_text() if node_id and page.locator(
-                    f"label[for='{node_id}']").count() else (node.get_attribute("aria-label") or node.get_attribute("name") or f"Field {index + 1}")
-                fields.append(BrowserField(f"#{node_id}" if node_id else f"input:nth-of-type({index + 1})",
-                                           label.strip(), input_type, node.get_attribute("required") is not None))
+                name = node.get_attribute("name")
+                aria = node.get_attribute("aria-label")
+                label = ""
+                if node_id and page.locator(f"label[for='{node_id}']").count():
+                    label = page.locator(f"label[for='{node_id}']").first.inner_text()
+                if not label:
+                    wrapping = node.evaluate("el => el.closest('label') && el.closest('label').innerText")
+                    label = wrapping or aria or name or f"Field {index + 1}"
+                tag_counts[tag_name] = tag_counts.get(tag_name, 0) + 1
+                locator = build_field_locator(
+                    tag=tag_name, element_id=node_id, name=name, aria_label=aria,
+                    tag_index=tag_counts[tag_name], accessible_label=str(label).strip())
+                fields.append(BrowserField(locator, str(label).strip(), input_type,
+                                           node.get_attribute("required") is not None))
             browser.close()
         return fields
 
@@ -134,15 +203,22 @@ def _validate_web_url(url: str) -> None:
 def fields_from_html(html: str) -> list[BrowserField]:
     soup = BeautifulSoup(html, "html.parser")
     fields = []
+    tag_counts: dict[str, int] = {}
     for index, node in enumerate(soup.select("input, textarea, select")):
         input_type = node.get("type") or ("text" if node.name == "input" else node.name)
         if input_type in {"hidden", "submit", "button"}:
             continue
         node_id = node.get("id")
+        name = node.get("name")
+        aria = node.get("aria-label")
         label_node = soup.select_one(f"label[for='{node_id}']") if node_id else None
+        wrapping_label = _wrapping_label_text(node)
         label = (label_node.get_text(" ", strip=True) if label_node else
-                 node.get("aria-label") or node.get("name") or node.get("placeholder") or f"Field {index + 1}")
-        locator = f"#{node_id}" if node_id else f"{node.name}[name='{node.get('name')}']" if node.get("name") else f"{node.name}:nth-of-type({index + 1})"
+                 wrapping_label or aria or name or node.get("placeholder") or f"Field {index + 1}")
+        tag_counts[node.name] = tag_counts.get(node.name, 0) + 1
+        locator = build_field_locator(
+            tag=node.name, element_id=node_id, name=name, aria_label=aria,
+            tag_index=tag_counts[node.name], accessible_label=label)
         fields.append(BrowserField(locator, label, input_type, node.has_attr("required")))
     return fields
 
@@ -274,9 +350,19 @@ def execute_approved_plan(db_path: Path | str, plan_id: int, *,
             print("Human action required: complete the access check in the browser, then press Enter here.")
             input()
         for item in safe_items:
-            locator = page.locator(item.locator).first
+            locator = playwright_locator(page, item.locator).first
             if not locator.count():
                 print(f"Skipped missing field: {item.label}")
+                continue
+            current_label = (
+                locator.get_attribute("aria-label")
+                or locator.get_attribute("name")
+                or locator.evaluate(
+                    "el => { const id = el.id; if (id) { const node = document.querySelector(`label[for='${id}']`); if (node) return node.innerText; } const wrap = el.closest('label'); return wrap ? wrap.innerText : ''; }")
+                or ""
+            )
+            if not labels_match(item.label, current_label):
+                print(f"Skipped label mismatch for {item.label}: found {current_label!r}")
                 continue
             locator.fill(item.value or "")
             filled += 1

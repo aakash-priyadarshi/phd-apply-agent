@@ -153,6 +153,7 @@ def test_intent_url_to_reviewed_application_and_workload_metrics(applicant):
     assert candidate["payload"]["deadline"] == "2027-01-15"
     assert candidate["payload"]["relevant_applicant_experience"]
     assert candidate["payload"]["research_fit"] >= 0
+    assert candidate["payload"]["qs_match_state"] == "UNKNOWN"
     accepted = orchestrator.accept_candidate(candidate["id"], "Reviewer", cycle="2027")
     with connect(applicant["path"]) as db:
         app = db.execute("SELECT * FROM applications WHERE id=?", (accepted["application_id"],)).fetchone()
@@ -172,6 +173,48 @@ def test_intent_url_to_reviewed_application_and_workload_metrics(applicant):
     metrics = orchestrator.workload_summary()
     assert metrics["PAGES_INGESTED"] == 1
     assert metrics["FIELDS_EXTRACTED_AUTOMATICALLY"] > 0
+
+
+def test_programme_ingestion_records_qs_rank_separately_from_research_fit(applicant):
+    orchestrator = ProgrammeOrchestrator(applicant["path"])
+    intent = orchestrator.create_intent(
+        "Find funded 2027 PhD programmes in reliable AI in the US, preferably QS top 50",
+        applicant["context"]["id"],
+    )
+    assert intent["filters"]["qs_max"] == 50
+    assert "US" in intent["filters"]["country_codes"]
+    html = """
+      <html><head><title>PhD in Computer Science | Stanford University</title></head>
+      <body><h1>PhD in Computer Science</h1>
+      <p>Stanford University, United States. September 2027 entry.</p>
+      <p>Applications close 2026-12-08. This is a fully funded studentship.</p>
+      <p>Required documents: CV, statement of purpose, and three academic references.</p>
+      </body></html>
+    """
+    result = orchestrator.analyse_supplied(
+        "https://cs.stanford.edu/phd", html, applicant["context"]["id"], intent_id=intent["id"],
+        method="UPLOADED_HTML", filename="stanford.html",
+    )
+    payload = result["candidate"]["payload"]
+    assert payload["university"] == "Stanford University"
+    assert payload["qs_rank_display"] == "=2"
+    assert payload["qs_rank_numeric"] == 2
+    assert payload["qs_match_state"] == "EXACT"
+    assert payload["country"] == "United States"
+    assert payload["country_code"] == "US"
+    assert payload["country_match_state"] == "CONFIRMED"
+    listed = orchestrator.list_candidates(
+        intent_id=intent["id"], extra_filters={"qs_max": 25, "country_codes": ["US"]})
+    assert listed and listed[0]["id"] == result["candidate"]["id"]
+    assert orchestrator.list_candidates(intent_id=intent["id"], extra_filters={"qs_max": 1}) == []
+    accepted = orchestrator.accept_candidate(result["candidate"]["id"], "Reviewer", cycle="2027")
+    with connect(applicant["path"]) as db:
+        programme = db.execute("SELECT * FROM programmes WHERE id=?",
+                               (accepted["programme_id"],)).fetchone()
+    assert programme["qs_rank_display"] == "=2"
+    assert programme["qs_rank_numeric"] == 2
+    assert programme["qs_source_evidence_id"]
+    assert programme["country"] == "United States"
 
 
 def test_failed_automation_requests_human_content_without_creating_candidate(applicant, monkeypatch):
@@ -305,6 +348,29 @@ def test_model_router_uses_configured_family_and_only_escalates():
         router.route("TAILORED_SOP", operator_tier="LUNA")
 
 
+def test_browser_locators_prefer_label_name_and_tag_specific_nth():
+    fields = fields_from_html("""
+      <form>
+        <label>Research experience<textarea name="research"></textarea></label>
+        <select name="country" aria-label="Country"></select>
+        <input aria-label="Full legal name">
+      </form>
+    """)
+    locators = {field.label: field.locator for field in fields}
+    assert locators["Research experience"] == "get-by-label:Research experience"
+    assert locators["Country"] == "get-by-label:Country"
+    assert locators["Full legal name"] == "get-by-label:Full legal name"
+    assert not any("nth-of-type" in field.locator for field in fields)
+    assert not any(field.locator.startswith("input:") for field in fields)
+
+
+def test_browser_locators_use_tag_specific_nth_without_identity():
+    fields = fields_from_html("<form><input><textarea></textarea><select></select></form>")
+    assert [field.locator for field in fields] == [
+        "xpath=(//input)[1]", "xpath=(//textarea)[1]", "xpath=(//select)[1]",
+    ]
+
+
 def test_browser_companion_command_matches_platform():
     assert _companion_command(12, "nt") == (
         ".\\.venv\\Scripts\\python.exe -m scripts.browser_companion 12", "powershell")
@@ -378,9 +444,10 @@ def test_migration_contains_intent_context_and_browser_tables(tmp_path):
     with connect(path) as db:
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         version = db.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-    assert version == 8
+    assert version == 9
     assert {"applicant_research_contexts", "context_retrievals", "programme_candidates",
-            "browser_fill_plans", "workload_events"} <= tables
+            "browser_fill_plans", "workload_events", "profile_build_operations",
+            "university_rankings", "university_aliases"} <= tables
 
 
 def test_intent_first_streamlit_home_renders_with_approved_context(applicant, monkeypatch, tmp_path):

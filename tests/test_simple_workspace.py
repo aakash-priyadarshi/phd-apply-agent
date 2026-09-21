@@ -11,7 +11,10 @@ import phd_agent.profile_workspace as profile_workspace
 from phd_agent.applicant_context import ApplicantResearchContextService
 from phd_agent.db import connect, migrate
 from phd_agent.documents import DocumentVault
+from phd_agent.ledger import Ledger
+from phd_agent.orchestration import ProgrammeOrchestrator
 from phd_agent.profile_workspace import ProfileUpload, ProfileWorkspace, extract_text
+from phd_agent.ui_simple import PAGES
 
 
 CV_TEXT = b"""Aakash Example
@@ -23,7 +26,7 @@ I aim to research reliable agentic AI systems.
 """
 
 
-def test_one_action_builds_context_and_markdown_summary(tmp_path):
+def test_one_action_extracts_exploration_context_and_markdown_summary(tmp_path):
     database = tmp_path / "phd_outreach.db"
     migrate(database)
     workspace = ProfileWorkspace(database)
@@ -33,17 +36,25 @@ def test_one_action_builds_context_and_markdown_summary(tmp_path):
     )
     assert result.documents_added == 1
     assert result.facts_in_profile > 0
+    assert result.confirmed is False
+    assert result.trust_level == "EXPLORATION"
     assert result.summary_path.is_file()
     summary = result.summary_path.read_text(encoding="utf-8")
     assert "# Applicant profile — Aakash Example" in summary
-    assert "Reliable evaluation of agentic AI" in summary
-    assert "Aakash-CV.txt" in summary
+    assert "Use this profile" in summary
     context = ApplicantResearchContextService(database).get(result.context_id)
-    assert context["profile_version_id"] == result.profile_version_id
-    assert context["master_cv_version_id"] == result.master_cv_version_id
+    assert context["trust_level"] == "EXPLORATION"
     with connect(database) as db:
-        assert db.execute("SELECT COUNT(*) FROM profile_versions WHERE approval_state='APPROVED'").fetchone()[0] == 1
-        assert db.execute("SELECT COUNT(*) FROM master_cv_versions WHERE approval_state='APPROVED'").fetchone()[0] == 1
+        assert db.execute("SELECT COUNT(*) FROM profile_versions WHERE approval_state='APPROVED'").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM master_cv_versions WHERE approval_state='APPROVED'").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM claim_revisions WHERE approved_for_outreach=1").fetchone()[0] == 0
+    discovery = ApplicantResearchContextService(database).retrieve(
+        result.context_id, "DISCOVERY_QUERY", "reliable agentic AI evaluation", use="exploration")
+    assert discovery.items
+    outreach = ApplicantResearchContextService(database).retrieve(
+        result.context_id, "PROFESSOR_EMAIL", "reliable agentic AI evaluation",
+        use="outreach", include_proposed=False)
+    assert outreach.items == ()
 
 
 def test_existing_vault_cv_can_finish_setup_without_reupload(tmp_path):
@@ -54,7 +65,9 @@ def test_existing_vault_cv_can_finish_setup_without_reupload(tmp_path):
     vault.set_approval(saved["version_id"], True, "Earlier review")
     result = ProfileWorkspace(database).build("Aakash Example", "Reliable AI agents")
     assert result.documents_added == 0
-    assert ApplicantResearchContextService(database).available_inputs()
+    context = ApplicantResearchContextService(database).latest()
+    assert context and context["trust_level"] == "EXPLORATION"
+    assert context["context"]["owner_name"] == "Aakash Example"
 
 
 def test_reusing_a_document_for_a_corrected_owner_builds_the_new_profile(tmp_path):
@@ -178,7 +191,7 @@ def test_model_aspirations_do_not_block_cv_and_sop_import(tmp_path, monkeypatch)
     )
     claims = workspace.truth.list_claims(result.profile_id)
     assert any(claim["claim_text"].startswith("I seek to investigate")
-               and claim["review_status"] == "APPROVED" for claim in claims)
+               and claim["review_status"] == "PENDING" for claim in claims)
     assert any(claim["claim_text"].startswith("Reliable agent evaluation")
                and claim["review_status"] == "REJECTED" for claim in claims)
     assert any("unclear aspiration" in warning for warning in result.warnings)
@@ -208,6 +221,62 @@ def test_retry_processes_pending_claims_after_an_earlier_partial_import(tmp_path
     assert any("unclear aspiration" in warning for warning in retried.warnings)
 
 
+def test_use_this_profile_promotes_extracted_facts_for_outreach(tmp_path):
+    database = tmp_path / "phd_outreach.db"
+    workspace = ProfileWorkspace(database)
+    extracted = workspace.build(
+        "Aakash Example", "Reliable AI agents", [ProfileUpload("cv.txt", CV_TEXT)])
+    confirmed = workspace.confirm(extracted.profile_id)
+    assert confirmed.confirmed is True
+    assert confirmed.trust_level == "TRUSTED"
+    assert confirmed.context_id != extracted.context_id
+    with connect(database) as db:
+        assert db.execute("SELECT COUNT(*) FROM profile_versions WHERE approval_state='APPROVED'").fetchone()[0] == 1
+        assert db.execute("SELECT COUNT(*) FROM master_cv_versions WHERE approval_state='APPROVED'").fetchone()[0] == 1
+        assert db.execute("SELECT COUNT(*) FROM claim_revisions WHERE approved_for_application=1").fetchone()[0] >= 1
+    outreach = ApplicantResearchContextService(database).retrieve(
+        confirmed.context_id, "PROFESSOR_EMAIL", "reliable agentic AI evaluation",
+        use="outreach", include_proposed=False)
+    assert outreach.items
+    assert ApplicantResearchContextService(database).latest()["trust_level"] == "TRUSTED"
+
+
+def test_failed_profile_build_is_not_used_as_latest_context(tmp_path, monkeypatch):
+    database = tmp_path / "phd_outreach.db"
+    workspace = ProfileWorkspace(database)
+
+    def fail_summary(*_args, **_kwargs):
+        raise RuntimeError("summary failed")
+
+    monkeypatch.setattr(workspace, "_summary", fail_summary)
+    with pytest.raises(RuntimeError, match="summary failed"):
+        workspace.build("Aakash Example", "Reliable AI agents", [ProfileUpload("cv.txt", CV_TEXT)])
+    assert ApplicantResearchContextService(database).latest() is None
+    with connect(database) as db:
+        assert db.execute("SELECT status FROM profile_build_operations ORDER BY id DESC LIMIT 1").fetchone()[0] == "FAILED"
+        failed = db.execute("SELECT COUNT(*) FROM applicant_research_contexts WHERE status='FAILED'").fetchone()[0]
+    assert failed == 1
+    monkeypatch.setattr(workspace, "_summary", ProfileWorkspace._summary.__get__(workspace, ProfileWorkspace))
+    recovered = workspace.build("Aakash Example", "Reliable AI agents")
+    assert recovered.trust_level == "EXPLORATION"
+    assert ApplicantResearchContextService(database).latest()["id"] == recovered.context_id
+
+
+def test_prepare_application_requires_confirmed_profile(tmp_path):
+    database = tmp_path / "phd_outreach.db"
+    workspace = ProfileWorkspace(database)
+    extracted = workspace.build(
+        "Aakash Example", "Reliable AI agents", [ProfileUpload("cv.txt", CV_TEXT)])
+    orchestrator = ProgrammeOrchestrator(database)
+    programme = orchestrator.ledger.create_programme("Stanford University", "PhD Computer Science")
+    application = orchestrator.ledger.create_application("2027", programme_id=programme)
+    blocked = orchestrator.prepare_application(application, context_id=extracted.context_id)
+    assert any("Use this profile" in item for item in blocked["blocking"])
+    confirmed = workspace.confirm(extracted.profile_id)
+    ready = orchestrator.prepare_application(application, context_id=confirmed.context_id)
+    assert not any("Use this profile" in item for item in ready["blocking"])
+
+
 def test_simple_workspace_renders_setup_then_task_navigation(tmp_path, monkeypatch):
     monkeypatch.setenv("PHD_AGENT_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("PHD_AGENT_ENV", "development")
@@ -225,3 +294,16 @@ def test_simple_workspace_renders_setup_then_task_navigation(tmp_path, monkeypat
     navigation = next(radio for radio in ready.radio if radio.label == "Navigation")
     assert navigation.options == ["Home", "Find programmes", "Applications", "People", "My documents"]
     assert any("Welcome back" in markdown.value for markdown in ready.markdown)
+    assert any(button.label == "Use this profile" for button in ready.button)
+    assert PAGES == ("Home", "Find programmes", "Applications", "People", "My documents")
+    ledger = Ledger(tmp_path / "phd_outreach.db")
+    ledger.create_application(
+        "2027", programme_id=ledger.create_programme(
+            "Stanford University", "PhD Computer Science",
+            portal_url="https://apply.stanford.edu"),
+        portal_url="https://apply.stanford.edu")
+    applications = AppTest.from_file(app_path, default_timeout=60).run()
+    navigation = next(radio for radio in applications.radio if radio.label == "Navigation")
+    applications = navigation.set_value("Applications").run()
+    assert not applications.exception
+    assert any("Continue application in browser" in markdown.value for markdown in applications.markdown)

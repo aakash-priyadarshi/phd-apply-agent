@@ -283,6 +283,21 @@ class ApplicantTruth:
                     approved_at=?, approved_by=? WHERE id=?""", (now, reviewer.strip(), profile_version_id))
             return profile_version_id
 
+    def approve_profile_version(self, version_id: int, reviewer: str) -> None:
+        if not reviewer.strip():
+            raise ValueError("Reviewer is required")
+        with transaction(self.db_path) as db:
+            version = db.execute("SELECT * FROM profile_versions WHERE id=?", (version_id,)).fetchone()
+            if not version or version["approval_state"] != "DRAFT":
+                raise ValueError("Only draft profile snapshots can be approved")
+            pending = db.execute("""SELECT cr.id FROM profile_version_claims pvc
+                JOIN claim_revisions cr ON cr.id=pvc.claim_revision_id
+                WHERE pvc.profile_version_id=? AND cr.review_status='PENDING'""", (version_id,)).fetchone()
+            if pending:
+                raise ValueError("Approve extracted facts before confirming the profile snapshot")
+            db.execute("""UPDATE profile_versions SET approval_state='APPROVED',
+                approved_at=?, approved_by=? WHERE id=?""", (utc_now(), reviewer.strip(), version_id))
+
     def list_profile_versions(self, profile_id: int) -> list[dict]:
         with connect(self.db_path) as db:
             return [dict(r) for r in db.execute(
