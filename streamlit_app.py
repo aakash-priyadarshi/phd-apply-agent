@@ -1371,14 +1371,24 @@ def main():
         if tracked:
             st.warning("Private runtime files are still tracked by Git: " + ", ".join(tracked))
 
-    workspace = st.sidebar.radio("Workspace", ["Application Agent", "Advanced / Legacy"])
-    if workspace == "Application Agent":
+    advanced_mode = st.sidebar.toggle("Advanced tools", value=False,
+        help="Detailed records and the retired 2025 outreach workspace")
+    if not advanced_mode:
         render_cms(settings.database_path)
         return
 
+    st.sidebar.warning("Advanced tools expose detailed records intended for troubleshooting and audit.")
     advanced_area = st.sidebar.radio("Advanced area", ["Data & audit", "Legacy outreach"])
     if advanced_area == "Data & audit":
         render_cms(settings.database_path, advanced=True)
+        return
+
+    st.title("Legacy outreach")
+    st.caption("The retired 2025 workspace is kept for historical compatibility.")
+    if not st.session_state.get("legacy_workspace_open"):
+        if st.button("Open legacy workspace"):
+            st.session_state.legacy_workspace_open = True
+            st.rerun()
         return
 
     # Custom CSS styling

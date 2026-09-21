@@ -650,5 +650,5 @@ def render_cms(db_path: Path, *, advanced: bool = False):
     if advanced:
         render_advanced_cms(db_path)
         return
-    from phd_agent.ui_agent import render_agent
-    render_agent(db_path)
+    from phd_agent.ui_simple import render_workspace
+    render_workspace(db_path)
