@@ -608,7 +608,7 @@ def render_vault(vault: DocumentVault):
                 st.error(f"Version {version['version_number']} is missing or corrupt")
 
 
-def render_cms(db_path: Path):
+def render_advanced_cms(db_path: Path):
     from phd_agent.ui_slice2 import render_discovery, render_tracks, render_truth
     from phd_agent.ui_slice3 import render_match_review, render_materials, render_packages
     from phd_agent.ui_slice4 import render_outreach
@@ -616,8 +616,8 @@ def render_cms(db_path: Path):
 
     ledger = Ledger(db_path)
     vault = DocumentVault(db_path)
-    st.title("PhD applications")
-    st.caption("Local application ledger, reviewed materials, outreach, reply follow-through, portal answers, and backup")
+    st.title("Advanced data & audit")
+    st.caption("Detailed ledger forms, provenance records, correction tools, package review, outreach controls, and archives")
     today, applications, documents, truth, tracks, discovery, matches, materials, packages, outreach, followthrough = st.tabs([
         "Today", "Applications", "Document Vault", "Applicant Truth", "Research Directions", "Discovery",
         "Match Review", "Materials", "Packages & Preflight", "Outreach Review", "Follow-through",
@@ -644,3 +644,11 @@ def render_cms(db_path: Path):
         render_outreach(db_path)
     with followthrough:
         render_followthrough(db_path)
+
+
+def render_cms(db_path: Path, *, advanced: bool = False):
+    if advanced:
+        render_advanced_cms(db_path)
+        return
+    from phd_agent.ui_agent import render_agent
+    render_agent(db_path)

@@ -13,6 +13,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from phd_agent.db import connect, migrate, transaction, utc_now
+from phd_agent.applicant_context import ApplicantResearchContextService
 from phd_agent.config import MATCH_WEIGHTS
 from phd_agent.discovery import freshness
 from phd_agent.documents import DocumentVault
@@ -98,6 +99,9 @@ class OutreachContext:
     requirement_states: tuple[tuple[int, str, str | None], ...]
     attachments: tuple[Attachment, ...]
     previous_contact_count: int
+    applicant_context_id: int | None = None
+    context_retrieval_id: int | None = None
+    master_cv_version_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -308,11 +312,41 @@ class OutreachService:
                                           d["canonical_filename"], d["sha256"], d["inclusion_reason"], d["sort_order"]))
         pubs = [p for p in publications if p["evidence_state"] == "VERIFIED"
                 and freshness(p["evidence_retrieved_at"], "PUBLICATION") == "CURRENT"]
+        applicant_context_id = None
+        context_retrieval_id = None
+        master_cv_version_id = None
+        selected_facts = facts
+        context_service = ApplicantResearchContextService(self.db_path)
+        try:
+            applicant_context = context_service.build_current(
+                profile_id=track["profile_id"], profile_version_id=profile_version_id,
+                track_version_id=track_version_id)
+        except ValueError as error:
+            raise OutreachBlocked(["APPLICANT_CONTEXT_UNAVAILABLE:" + str(error)]) from error
+        query = " ".join(filter(None, (
+            faculty["research_topics"], track["research_problem"],
+            " ".join(p["title"] for p in pubs[:3]),
+        )))
+        retrieval = context_service.retrieve(
+            applicant_context["id"], "PROFESSOR_EMAIL", query,
+            top_k=3, use="outreach", include_proposed=False,
+        )
+        ordered_ids = []
+        for item in retrieval.items:
+            for claim_id in item.claim_revision_ids:
+                if claim_id in approved and approved[claim_id]["classification"] == "FACT" and claim_id not in ordered_ids:
+                    ordered_ids.append(claim_id)
+        if not ordered_ids:
+            raise OutreachBlocked(["NO_RELEVANT_APPROVED_CV_EVIDENCE"])
+        selected_facts = [approved[claim_id] for claim_id in ordered_ids[:3]]
+        applicant_context_id = applicant_context["id"]
+        context_retrieval_id = retrieval.id
+        master_cv_version_id = applicant_context["master_cv_version_id"]
         return OutreachContext(owner["owner_name"],faculty_id, faculty["name"], faculty["institution"], faculty["department"],
             faculty["lab"], faculty["official_title"], faculty["email"], faculty["research_topics"] or "",
             tuple(sorted(research_ids)), tuple(sorted(email_ids)), tuple(sorted(affiliation_ids)),
             tuple(p["id"] for p in pubs[:3]), tuple(p["title"] for p in pubs[:3]), profile_version_id,
-            tuple(c["id"] for c in facts), tuple(c["claim_text"] for c in facts), track_version_id,
+            tuple(c["id"] for c in selected_facts), tuple(c["claim_text"] for c in selected_facts), track_version_id,
             track["research_problem"], application_id, programme["programme_name"] if programme else None,
             opportunity["id"] if opportunity else None, opportunity["opening_status"] if opportunity else None,
             opportunity["contact_policy"], app["portal_url"] or opportunity["application_route"] or (programme["portal_url"] if programme else None),
@@ -320,7 +354,7 @@ class OutreachService:
             json.loads(assessment[0]) if assessment else {}, document_package_id,
             tuple(r["id"] for r in requirements),
             tuple((r["id"],r["requirement_state"],r["normalized_document_type"]) for r in requirements),
-            tuple(attachments), 0)
+            tuple(attachments), 0, applicant_context_id, context_retrieval_id, master_cv_version_id)
 
     @staticmethod
     def draft_text(context: OutreachContext, stage: str = "INITIAL") -> OutreachEmailDraft:
@@ -509,6 +543,12 @@ class OutreachService:
                     VALUES(?,?,?,?,?,?,?)""", (package_id,a.document_version_id,a.requirement_id,a.sha256,
                     a.filename,a.order,a.reason))
             self._event(db, package_id, None, "GENERATED", None, status, "SYSTEM")
+        if context.applicant_context_id:
+            ApplicantResearchContextService(self.db_path).link_output(
+                "OUTREACH_PACKAGE", package_id, context.applicant_context_id,
+                context.context_retrieval_id, provider=draft.provider,
+                model=draft.model, prompt_version=draft.prompt_version,
+            )
         return package_id
 
     @staticmethod

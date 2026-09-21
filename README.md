@@ -1,6 +1,6 @@
 # PhD application and outreach console
 
-This is a local Streamlit application with an application ledger, Document Vault, versioned applicant truth library, research directions, source-backed discovery, and a reviewed faculty outreach queue. The earlier CV analysis, professor discovery, and email drafting/editing remain available under **Legacy outreach**; its sending controls are disabled. The [2026–27 implementation plan](docs/implementation-plan-2026-27.md) describes the staged work.
+This is a Streamlit PhD application agent with an application ledger, Document Vault, versioned applicant truth, CV-grounded research context, source-backed discovery, reviewed faculty outreach, portal assistance, and immutable submission records. The normal workspace is intent first. Detailed database forms are under **Advanced / Legacy → Data & audit**; the 2025 outreach interface is retained only under **Advanced / Legacy → Legacy outreach**, with its sending controls disabled. The [2026–27 implementation plan](docs/implementation-plan-2026-27.md) and [intent-first architecture](docs/intent-first-orchestration.md) describe the system.
 
 ## Run locally
 
@@ -55,15 +55,18 @@ The app copies non-credential files from the old repository-root layout into `da
 
 The application ledger uses additive SQLite migrations recorded in `schema_migrations`. Slice 2 adds profile, claim, research track, catalogue, faculty verification, publication, and assessment tables without changing legacy professor rows. The approved Slice 1 baseline is backed up under `data/backups/phd_outreach-slice1-eefd5b8c.db`. Stop the app before any restore and keep a separate copy of the current database first; restoring the baseline discards later local work. Vault files under `data/documents/` need their own backup alongside the database. On Railway, put SQLite and the Vault on the `/data` volume and enable Railway volume backups; do not treat in-app backups on the same volume as disaster recovery.
 
-## Manual application workflow
+## Intent-first application workflow
 
-Open **Application CMS** in the sidebar. You can use it without an OpenAI key or Gmail authorization.
+Open **Application Agent** in the sidebar. You can use the deterministic context, ledger, Vault, URL ingestion, fill planning, and review workflows without an OpenAI key or Gmail authorization.
 
-1. Add an official source snapshot with its URL, excerpt, and verification state.
-2. Add a programme or opportunity, then create an application and record its next action.
-3. Add sourced application, funding, document, and referee deadlines. Add requirements with `FORMAL_APPLICATION`, `FACULTY_OUTREACH`, or `REPLY_REQUEST` context. Keep unresolved items `UNKNOWN`.
-4. Upload original files in **Document Vault**. Matching SHA-256 bytes show the existing version; source bytes are never overwritten. Review and approve a version, then link it to a matching requirement from the application detail screen. The same version can be linked to multiple applications.
-5. Add tasks and referees. The **Today** screen shows deadlines, missing required items, unknown requirements, overdue tasks, and document approval or expiry alerts.
+1. Approve an applicant profile snapshot, active research direction, and Master CV. The agent builds an immutable `ApplicantResearchContext` and retrieves only task-relevant approved experience.
+2. Enter a research intent or analyse one official programme URL. Static retrieval is attempted first; blocked or weak pages request pasted text or saved HTML/PDF.
+3. Review extracted fields, evidence, unknowns, CV-grounded fit, and shortlist/reject/accept the candidate. Accepting once creates the programme, opportunity, application, source snapshot, deadline, and document requirements that the evidence supports.
+4. Use **Find Relevant Supervisors** for a shortlisted application. Cards keep demonstrated applicant experience, proposed direction, Research Fit, contact policy, evidence, and unknowns distinct.
+5. Reuse approved common documents and Application Profile values. **Prepare Application** reports missing, unknown, package, and preflight blockers without hiding them in a percentage.
+6. Analyse saved portal HTML in **Browser Assistant**, approve the fill plan, and run the optional local Playwright companion. It fills approved safe fields only and stops before submission.
+
+The detailed ledger, source, claim, matching, material, package, outreach, reply, archive, and backup screens remain available in **Advanced / Legacy → Data & audit** for review and correction.
 
 Administrative readiness is shown as separate counts: required items completed, unknown requirements, and conditional requirements. It is a document/process checklist, not an admission assessment. `PASSPORT` and `GOVERNMENT_ID` default to `HIGHLY_SENSITIVE` and are local-only. No cloud backend is active.
 
@@ -131,12 +134,25 @@ The isolated demonstration runs with `.\.venv\Scripts\python.exe -m scripts.slic
 
 OAuth client rotation remains mandatory before any real Gmail use.
 
-## Current workflow
+## Local browser companion
 
-1. Upload or reuse a local CV, then generate the research profile.
-2. Add target universities or reuse the copied target list.
-3. Run Stage 1 discovery and inspect the results.
-4. Generate and edit an email for one professor.
-5. Review the draft locally; use only the approved Outreach Review package workflow for Gmail sending after credential rotation and Sent reconciliation.
+Portal browser sessions remain on the applicant's computer. Playwright is deliberately not installed in the Railway production requirements. In the local virtual environment, install it when needed:
 
-The 2025 discovery map is limited, and existing professor records need reverification for the new cycle. Do not treat an old `verified` status as current recruiting evidence.
+```powershell
+.\.venv\Scripts\python.exe -m pip install playwright
+.\.venv\Scripts\python.exe -m playwright install chromium
+```
+
+Create and approve a fill plan in **Browser Assistant**, then run the command shown by the app, for example:
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.browser_companion 12
+```
+
+The companion uses a persistent browser profile under the ignored data directory, pauses for access checks, fills only `SAFE_AUTOFILL` fields, and closes without submitting. Passwords, MFA, payment, identity values, legal declarations, file chooser actions, and final submission remain manual.
+
+## Model routing
+
+`phd_agent.model_router` keeps GPT-5.6 family names and escalation policy outside business logic. Luna is the default for low risk extraction and classification, Terra for programme/faculty reasoning and first drafts, and Sol for high stakes research fit and final document work. Low confidence, conflicting evidence, unsupported output, or an operator request can escalate a task; an override cannot lower its reviewed risk tier. Deterministic safety gates do not use a model.
+
+The 2025 discovery map remains historical data, and existing professor records still require current evidence. Do not treat an old score or publication activity as proof of a current opening.

@@ -14,6 +14,7 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 
 from phd_agent.db import connect, migrate, transaction, utc_now
+from phd_agent.applicant_context import ApplicantResearchContextService
 from phd_agent.documents import DocumentVault
 
 
@@ -318,6 +319,19 @@ class MaterialStudio:
         claim_ids = sorted(set(claim_ids or []))
         if not set(claim_ids) <= approved.keys():
             raise ValueError("Rejected or unsupported applicant claim")
+        context_service = ApplicantResearchContextService(self.db_path)
+        applicant_context = None
+        context_master_id = master_cv_version_id
+        if context_master_id is None:
+            with connect(self.db_path) as db:
+                current_master = db.execute("""SELECT id FROM master_cv_versions
+                    WHERE profile_version_id=? AND approval_state='APPROVED'
+                    ORDER BY version_number DESC,id DESC LIMIT 1""", (profile_version_id,)).fetchone()
+            context_master_id = current_master["id"] if current_master else None
+        if context_master_id is None:
+            raise ValueError("An approved Master CV is required for generated application materials")
+        applicant_context = context_service.build(
+            profile_version_id, context_master_id, track_version_id)
         title = kind if kind in {"CV", "SOP"} else kind.replace("_", " ").title()
         pdf = render_pdf(title, content)
         quality = self._quality(kind, content, application_id, requirement_id, claim_ids, publication_ids or [], pdf)
@@ -340,10 +354,12 @@ class MaterialStudio:
                 WHERE id=?""", (_dump({"application_id": application_id,"faculty_id": faculty_id,
                 "profile_version_id": profile_version_id,"research_track_version_id": track_version_id,
                 "requirement_id": requirement_id,"publication_ids": publication_ids or [],
-                "module_ids": module_ids or []}), template, "manual",
+                "module_ids": module_ids or [],
+                "applicant_context_id": applicant_context["id"],
+                "applicant_context_sha256": applicant_context["context_sha256"]}), template, "manual",
                 None, _dump(claim_ids), _dump(evidence_ids or []),
                 "" if not parent_artifact_id else "new version", utc_now(), saved["version_id"]))
-            return db.execute("""INSERT INTO generated_artifacts
+            artifact_id = db.execute("""INSERT INTO generated_artifacts
                 (document_version_id,parent_artifact_id,kind,application_id,faculty_profile_id,profile_version_id,
                  research_track_version_id,master_cv_version_id,requirement_id,claim_revision_ids_json,
                  story_module_version_ids_json,publication_ids_json,evidence_ids_json,content_text,diff_json,
@@ -352,6 +368,11 @@ class MaterialStudio:
                 application_id,faculty_id,profile_version_id,track_version_id,master_cv_version_id,requirement_id,
                 _dump(claim_ids),_dump(module_ids or []),_dump(publication_ids or []),_dump(evidence_ids or []),
                 content,_dump(diff or {}),_dump(quality),template,"1","manual","manual",utc_now())).lastrowid
+        context_service.link_output(
+            "GENERATED_ARTIFACT", artifact_id, applicant_context["id"],
+            provider="manual", model="manual", prompt_version=template,
+        )
+        return artifact_id
 
     def revise_artifact(self, artifact_id: int, content: str) -> int:
         with connect(self.db_path) as db:

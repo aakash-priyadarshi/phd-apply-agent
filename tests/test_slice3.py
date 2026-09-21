@@ -44,6 +44,11 @@ def scenario(tmp_path):
                                       expected_contribution="More reliable retrieval agents.",
                                       supporting_claim_revision_ids=[fact])
     truth.approve_track(tv, "Demo reviewer")
+    base_master = studio.create_master_cv(pv, [
+        {"name":"Research Experience","bullets":[{"text":"I evaluated reliable agents with retrieval methods.","claim_revision_ids":[fact]}]},
+        {"name":"Profile","bullets":[{"text":"I aim to study reliable retrieval agents.","claim_revision_ids":[aim]}]},
+    ])
+    studio.review_master_cv(base_master, "Demo reviewer", True)
     evidence = ledger.create_evidence("https://example.edu/phd", "PROGRAMME", "Reviewed admissions and document requirements", "VERIFIED")
     faculty_evidence = ledger.create_evidence("https://example.edu/faculty/demo", "FACULTY", "Research on retrieval and agent reliability", "VERIFIED")
     publication_evidence = ledger.create_evidence("https://openalex.org/W999", "PUBLICATION", "Stored publication record", "VERIFIED")
