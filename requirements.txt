@@ -10,5 +10,5 @@ google-api-python-client>=2.70
 PyPDF2>=3.0
 python-dotenv>=1.0
 python-docx>=1.2
-pydantic>=2.0
+pydantic>=2.13.5
 reportlab>=4.0
