@@ -40,8 +40,9 @@ import PyPDF2
 from io import BytesIO
 from dotenv import load_dotenv
 
+from phd_agent.access import access_state
 from phd_agent.config import load_settings
-from phd_agent.paths import ensure_data_layout
+from phd_agent.runtime import StartupError, prepare_runtime
 from phd_agent.security import GitInspectionFailed, tracked_private_paths
 from phd_agent.ui import render_cms
 
@@ -56,14 +57,12 @@ except ImportError:
 
 # Load environment variables
 SETTINGS = load_settings()
-ensure_data_layout(SETTINGS.data_dir)
 
-# Configure logging
+# Configure logging. File logs are attached after the runtime directory exists.
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(SETTINGS.log_path, encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
@@ -1310,6 +1309,41 @@ def show_email_preview(professor_data):
     show_email_edit_modal(professor_data)
 
 
+def _identity_email(user) -> str | None:
+    email = getattr(user, "email", None)
+    if email:
+        return str(email)
+    getter = getattr(user, "get", None)
+    if callable(getter):
+        value = getter("email")
+        return str(value) if value else None
+    return None
+
+
+def _operator_allowed(settings) -> bool:
+    user = getattr(st, "user", None)
+    authenticated = bool(getattr(user, "is_logged_in", False))
+    email = _identity_email(user) if user is not None else None
+    state = access_state(authenticated=authenticated, email=email, settings=settings)
+    if state == "allowed":
+        return True
+    if state == "unauthenticated":
+        st.header("This application is private.")
+        st.write("Sign in with an allowlisted Google account to continue.")
+        login = getattr(st, "login", None)
+        if callable(login):
+            st.button("Log in with Google", on_click=login)
+        st.stop()
+        return False
+    st.header("Not authorized")
+    st.write("This account is not on the operator allowlist.")
+    logout = getattr(st, "logout", None)
+    if callable(logout):
+        st.button("Log out", on_click=logout)
+    st.stop()
+    return False
+
+
 def main():
     """Main Streamlit application function."""
     st.set_page_config(
@@ -1318,6 +1352,16 @@ def main():
         layout="wide",
         initial_sidebar_state="expanded"
     )
+
+    try:
+        settings = prepare_runtime()
+    except StartupError as error:
+        st.error("This application cannot start with the current host configuration.")
+        st.write(str(error))
+        st.stop()
+        return
+    if not _operator_allowed(settings):
+        return
 
     try:
         tracked = tracked_private_paths()
@@ -1329,7 +1373,7 @@ def main():
 
     workspace = st.sidebar.radio("Workspace", ["Application CMS", "Legacy outreach"])
     if workspace == "Application CMS":
-        render_cms(SETTINGS.database_path)
+        render_cms(settings.database_path)
         return
 
     # Custom CSS styling

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import argparse
 
-from phd_agent.config import load_settings
+from phd_agent.config import load_settings, refuse_hosted_scripts
 from phd_agent.db import connect
 from phd_agent.discovery import Discovery, canonical_url
 from phd_agent.ledger import Ledger
@@ -71,6 +71,7 @@ TRACK_DRAFTS = (
 
 
 def main() -> None:
+    refuse_hosted_scripts()
     parser = argparse.ArgumentParser()
     parser.add_argument("--apply", action="store_true", help="Apply the reviewed pilot to the local SQLite database")
     args = parser.parse_args()

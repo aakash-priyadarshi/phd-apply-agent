@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from phd_agent.backup import BackupService
+from phd_agent.config import refuse_hosted_scripts
 from phd_agent.db import utc_now
 from phd_agent.discovery import Discovery
 from phd_agent.documents import DocumentVault
@@ -135,6 +136,7 @@ def run(output_dir: Path) -> dict:
 
 
 if __name__ == "__main__":
+    refuse_hosted_scripts()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, default=Path("data/slice5-demo"))
     args = parser.parse_args()

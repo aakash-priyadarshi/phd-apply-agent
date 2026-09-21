@@ -16,6 +16,7 @@ from pathlib import Path
 
 from PyPDF2 import PdfReader
 
+from phd_agent.config import refuse_hosted_scripts
 from phd_agent.db import connect, utc_now, transaction
 from phd_agent.documents import DocumentVault
 from phd_agent.ledger import Ledger
@@ -175,6 +176,7 @@ def run(source_db: Path, output_dir: Path, *, liverpool_results: Path | None = N
 
 
 if __name__ == "__main__":
+    refuse_hosted_scripts()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-db", type=Path, default=Path("data/phd_outreach.db"))
     parser.add_argument("--output-dir", type=Path, default=Path("data/slice3-demo-2026-09-21"))

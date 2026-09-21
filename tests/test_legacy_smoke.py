@@ -52,6 +52,8 @@ class FakeResponse:
 
 def test_legacy_upload_discover_draft_edit_offline(tmp_path, monkeypatch):
     monkeypatch.setenv("PHD_AGENT_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("PHD_AGENT_ENV", "development")
+    monkeypatch.setenv("PHD_AGENT_AUTH_DISABLED", "true")
     monkeypatch.setenv("OPENAI_API_KEY", "test-only-key")
     monkeypatch.setenv("USER_NAME", "Test Applicant")
     monkeypatch.setattr(openai, "OpenAI", FakeClient)
