@@ -164,10 +164,12 @@ def _deterministic_candidates(text: str, *, limit: int = 36) -> list[dict]:
         if len(key.split()) < 4 or key in seen:
             continue
         seen.add(key)
-        future = bool(re.search(r"\b(aim|hope|intend|plan|would like|future research|interested in)\b", line, re.I))
+        future = ApplicantTruth._aspiration_wording(line) or bool(re.search(
+            r"\b(aim|hope|intend|plan|seek|aspire|wish|would like|future research|interested in)\b",
+            line, re.I))
         statement = line
-        if future and not re.search(r"\b(i aim|i hope|i intend|i plan|i would like|my goal|future research|i am interested in)\b", line, re.I):
-            statement = "I aim to " + line[0].lower() + line[1:]
+        if future and not ApplicantTruth._aspiration_wording(line):
+            statement = "I aim to pursue this future research direction: " + line
         candidates.append({
             "statement": statement,
             "category": _category(line),
@@ -269,20 +271,24 @@ class ProfileWorkspace:
                 JOIN claims c ON c.id=cr.claim_id
                 WHERE cr.extraction_id=? AND cr.review_status='APPROVED' AND c.profile_id=?""",
                 (extraction_id, profile_id))]
-        if existing:
+            pending = [dict(row) for row in db.execute("""SELECT cr.*,c.category FROM claim_revisions cr
+                JOIN claims c ON c.id=cr.claim_id
+                WHERE cr.extraction_id=? AND cr.review_status='PENDING' AND c.profile_id=?""",
+                (extraction_id, profile_id))]
+        if existing and not pending:
             return existing, []
         warnings = []
-        if api_key:
+        if not pending and api_key:
             try:
                 model = ModelConfig.from_environ().luna
                 self.truth.extract_candidates(profile_id, extraction_id, api_key=api_key, model=model)
             except Exception as error:
                 warnings.append(f"Structured extraction was unavailable; used local parsing ({type(error).__name__}).")
-        with connect(self.db_path) as db:
-            pending = [dict(row) for row in db.execute("""SELECT cr.* FROM claim_revisions cr
-                JOIN claims c ON c.id=cr.claim_id
-                WHERE cr.extraction_id=? AND cr.review_status='PENDING' AND c.profile_id=?""",
-                (extraction_id, profile_id))]
+            with connect(self.db_path) as db:
+                pending = [dict(row) for row in db.execute("""SELECT cr.*,c.category FROM claim_revisions cr
+                    JOIN claims c ON c.id=cr.claim_id
+                    WHERE cr.extraction_id=? AND cr.review_status='PENDING' AND c.profile_id=?""",
+                    (extraction_id, profile_id))]
         if not pending:
             for item in _deterministic_candidates(text):
                 revision_id = self.truth.create_claim(
@@ -294,13 +300,26 @@ class ProfileWorkspace:
                 pending.append(self.truth._claim_revision(revision_id))
         approved = []
         for claim in pending:
-            self.truth.review_claim(
-                claim["id"], True, self.reviewer, verification_state="VERIFIED",
-                for_application=True, for_outreach=True,
-                notes=(claim["notes"] or "") + "\nIncluded through the simple profile workspace.",
-            )
+            notes = (claim["notes"] or "") + "\nIncluded through the simple profile workspace."
+            try:
+                self.truth.review_claim(
+                    claim["id"], True, self.reviewer, verification_state="VERIFIED",
+                    for_application=True, for_outreach=True, notes=notes,
+                )
+            except ValueError as error:
+                if (claim["classification"] != "ASPIRATION"
+                        or "future aim" not in str(error)):
+                    raise
+                self.truth.review_claim(
+                    claim["id"], False, self.reviewer,
+                    notes=notes + "\nSkipped because the extracted wording did not describe a future aim.",
+                )
+                warnings.append(
+                    "Skipped one unclear aspiration while reading "
+                    f"{self.vault.get_version(version_id)['original_filename']}.")
+                continue
             approved.append(claim["id"])
-        return approved, warnings
+        return [*existing, *approved], warnings
 
     def _profile_version(self, profile_id: int, claim_ids: list[int]) -> int:
         claim_ids = sorted(set(claim_ids))
