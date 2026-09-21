@@ -69,8 +69,11 @@ def test_legacy_upload_discover_draft_edit_offline(tmp_path, monkeypatch):
 
     app = AppTest.from_file(Path(__file__).resolve().parents[1] / "streamlit_app.py", default_timeout=60).run()
     assert not app.exception
-    app.radio[0].set_value("Advanced / Legacy").run()
+    app.toggle[0].set_value(True).run()
     next(radio for radio in app.radio if radio.label == "Advanced area").set_value("Legacy outreach").run()
+    assert not app.exception
+    assert not app.get("file_uploader")
+    next(button for button in app.button if button.label == "Open legacy workspace").click().run()
     assert not app.exception
     app.get("file_uploader")[0].upload("test-cv.pdf", stream.getvalue(), "application/pdf").run()
     assert not app.exception

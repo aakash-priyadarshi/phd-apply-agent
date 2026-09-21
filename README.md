@@ -57,16 +57,16 @@ The application ledger uses additive SQLite migrations recorded in `schema_migra
 
 ## Intent-first application workflow
 
-Open **Application Agent** in the sidebar. You can use the deterministic context, ledger, Vault, URL ingestion, fill planning, and review workflows without an OpenAI key or Gmail authorization.
+The application now opens directly into a simple personal workspace. You can build the applicant profile, reuse the Vault, analyse URLs, manage applications and review matching without learning the underlying database screens. OpenAI improves structured extraction and current web discovery when configured; local parsing and the core workspace work without it.
 
-1. Approve an applicant profile snapshot, active research direction, and Master CV. The agent builds an immutable `ApplicantResearchContext` and retrieves only task-relevant approved experience.
+1. Add a CV and supporting documents under **Build my profile**. One action stores the originals, extracts source-backed facts, creates the internal profile/Master CV/research context, and writes a readable `data/profile_summaries/applicant-profile-vN.md` file. Previously uploaded Vault documents are detected and reused.
 2. Enter a research intent or analyse one official programme URL. Static retrieval is attempted first; blocked or weak pages request pasted text or saved HTML/PDF.
 3. Review extracted fields, evidence, unknowns, CV-grounded fit, and shortlist/reject/accept the candidate. Accepting once creates the programme, opportunity, application, source snapshot, deadline, and document requirements that the evidence supports.
 4. Use **Find Relevant Supervisors** for a shortlisted application. Cards keep demonstrated applicant experience, proposed direction, Research Fit, contact policy, evidence, and unknowns distinct.
 5. Reuse approved common documents and Application Profile values. **Prepare Application** reports missing, unknown, package, and preflight blockers without hiding them in a percentage.
 6. Analyse saved portal HTML in **Browser Assistant**, approve the fill plan, and run the optional local Playwright companion. It fills approved safe fields only and stops before submission.
 
-The detailed ledger, source, claim, matching, material, package, outreach, reply, archive, and backup screens remain available in **Advanced / Legacy → Data & audit** for review and correction.
+The detailed ledger, source, claim, matching, material, package, outreach, reply, archive, and backup screens remain available after enabling **Advanced tools → Data & audit**. The retired 2025 workspace is not loaded until **Open legacy workspace** is pressed.
 
 Administrative readiness is shown as separate counts: required items completed, unknown requirements, and conditional requirements. It is a document/process checklist, not an admission assessment. `PASSPORT` and `GOVERNMENT_ID` default to `HIGHLY_SENSITIVE` and are local-only. No cloud backend is active.
 

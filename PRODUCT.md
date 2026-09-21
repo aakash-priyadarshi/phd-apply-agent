@@ -49,6 +49,8 @@ The repository contains the approved Slice 0–5 implementation, additive SQLite
 3. Show provenance, uncertainty, and the next useful action at the point of decision.
 4. Preserve human approval at consequential boundaries.
 5. Measure success by manual work avoided without weakening correctness.
+6. A CV upload is setup, not an administrative record. One profile action creates the internal document, claim, profile, research-track, Master CV and context versions.
+7. Keep approval states and record IDs out of the normal interface. Show them only in Advanced for troubleshooting and audit.
 
 ## Accessibility & Inclusion
 

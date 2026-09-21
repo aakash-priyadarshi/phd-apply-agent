@@ -392,6 +392,6 @@ def test_intent_first_streamlit_home_renders_with_approved_context(applicant, mo
     monkeypatch.setenv("PHD_AGENT_AUTH_DISABLED", "true")
     app = AppTest.from_file(Path(__file__).resolve().parents[1] / "streamlit_app.py", default_timeout=60).run()
     assert not app.exception
-    assert app.radio[0].options == ["Application Agent", "Advanced / Legacy"]
-    assert any(title.value == "PhD Application Agent" for title in app.title)
-    assert any(area.label == "Navigate" and area.value == "Today / Agent" for area in app.radio)
+    assert app.toggle[0].label == "Advanced tools"
+    assert any(area.label == "Navigation" and area.value == "Home" for area in app.radio)
+    assert any("Welcome back" in markdown.value for markdown in app.markdown)

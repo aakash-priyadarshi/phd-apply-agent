@@ -1,6 +1,6 @@
 # Interface design
 
-The application uses an **academic run sheet** visual system: a calm operational workspace that resembles a well prepared research protocol. It supports dense evidence without making the operator feel as if they are editing a database.
+The application uses a **calm personal workspace** visual system. It should feel like a focused assistant for one applicant, with evidence and records handled behind the interface.
 
 ## Mode
 
@@ -8,10 +8,11 @@ Operate. The applicant should always see the next useful action, the evidence be
 
 ## Composition
 
-- A narrow navigation rail names the six normal workflow areas.
+- A narrow navigation rail names five plain-language areas: Home, Find programmes, Applications, People, and My documents.
 - The main canvas begins with one action or decision, followed by current state and evidence.
 - Candidate programmes, professors, applications, and fill plans use bordered records with stable metadata positions.
-- Detailed tables, IDs, migration-era forms, and audit correction tools live under Advanced / Legacy.
+- Setup is one guided document action. Existing Vault files are detected and can finish setup without re-uploading.
+- Detailed tables, approvals, IDs, migration-era forms, and audit correction tools live under Advanced.
 - Status summaries use counts and plain words. Percentages never replace unknown or conditional counts.
 
 ## Visual system
@@ -25,11 +26,13 @@ Operate. The applicant should always see the next useful action, the evidence be
 
 ## Interaction
 
-- Intent is the primary first action.
+- Intent is the primary first action after the applicant profile exists.
+- Document uploads immediately create a readable Markdown profile summary and the internal reviewed context required by matching and generation.
 - URL ingestion escalates visibly from static retrieval to local browser assistance to paste/upload.
 - Candidate acceptance is one review form and one action.
 - Consequential actions name what will be created; sending and submission remain separate explicit actions.
 - Unknown, uncertain, stale, and blocked states remain visible until reviewed.
+- Legacy outreach is lazy loaded only after a separate explicit open action, so entering Advanced cannot trigger a document chooser.
 
 ## Adaptation
 
