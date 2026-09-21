@@ -1,7 +1,7 @@
 streamlit>=1.42
 pandas>=1.5
 openai>=2.0
-requests>=2.31
+requests>=2.34.2
 beautifulsoup4>=4.12
 google-auth>=2.15
 google-auth-oauthlib>=0.8
