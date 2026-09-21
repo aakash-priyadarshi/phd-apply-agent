@@ -1,294 +1,114 @@
-# 🎓 PhD Outreach Automation Agent
+# PhD application and outreach console
 
-A sophisticated, AI-powered application that automates the process of discovering professors, generating personalized outreach emails, and managing PhD application communications. Built with Streamlit, OpenAI GPT models, and Gmail API integration.
+This is a local Streamlit application with an application ledger, Document Vault, versioned applicant truth library, research directions, source-backed discovery, and a reviewed faculty outreach queue. The earlier CV analysis, professor discovery, and email drafting/editing remain available under **Legacy outreach**; its sending controls are disabled. The [2026–27 implementation plan](docs/implementation-plan-2026-27.md) describes the staged work.
 
-## 🚀 Features
+## Run locally
 
-### 🔍 **Intelligent Professor Discovery**
-- **Stage 1**: Cost-effective professor discovery using GPT-4o-mini
-- Advanced web scraping with BeautifulSoup and requests
-- Smart alignment scoring based on research interests
-- Duplicate detection and management
-- University-specific faculty page navigation
+Use Python 3.11 or newer. On Windows, run `setup.bat`, copy `.env.example` to `.env`, fill in your values, then run `start_phd_outreach.bat`.
 
-### 📧 **AI-Powered Email Generation**
-- **Stage 2**: High-quality personalized emails using GPT-4
-- Contextual email drafting based on professor's research
-- Professional email templates with customization
-- Bulk email generation with cost optimization
-- Email preview and editing with modal interface
+On macOS or Linux:
 
-### 📄 **CV Analysis & Profile Generation**
-- Automated CV parsing using PyPDF2
-- AI-generated research profiles from CV content
-- Persistent profile storage across app restarts
-- Research alignment highlighting
-
-### 📬 **Gmail Integration**
-- Seamless Gmail API integration for email sending
-- Bulk email sending with rate limiting
-- Email delivery tracking and status monitoring
-- CV attachment support
-- Professional email formatting
-
-### 💰 **Cost Tracking & Analytics**
-- Real-time API cost monitoring
-- Stage-wise cost breakdown (Discovery vs Email Generation)
-- Daily and total cost summaries
-- Professor processing statistics
-
-### 🎨 **Modern User Interface**
-- Clean, intuitive Streamlit interface
-- Responsive design with custom CSS styling
-- Modal dialogs for spacious email editing
-- Progress tracking and live updates
-- Professional dark/light theme support
-
-## 🛠️ Installation
-
-### Prerequisites
-- Python 3.8+
-- OpenAI API key
-- Google Cloud Console project with Gmail API enabled
-- Gmail API credentials
-
-### Quick Setup
-
-1. **Clone the repository**
-```bash
-git clone https://github.com/aakash-priyadarshi/phd-apply-agent.git
-cd phd-apply-agent
+```sh
+sh setup.sh
+cp .env.example .env
+# Edit .env locally.
+.venv/bin/python -m streamlit run streamlit_app.py
 ```
 
-2. **Create virtual environment**
-```bash
-python -m venv phd_outreach_env
-# On Windows
-phd_outreach_env\Scripts\activate
-# On macOS/Linux
-source phd_outreach_env/bin/activate
+For tests, install `requirements-dev.txt` in the same environment and run `python -m pytest -q`. Normal tests do not send email. The two Gmail integration tests require explicit environment flags and a test recipient.
+
+## Local data
+
+All runtime files are kept outside Git under `data/` by default:
+
+```text
+data/
+  phd_outreach.db
+  PhD_Targets.csv
+  PhD_Results.csv
+  research_profile.txt
+  credentials.json
+  gmail_token.json
+  documents/uploaded_cv.pdf
+  documents/objects/<SHA-256 prefix>/<SHA-256>
+  backups/phd_outreach-legacy*.db
+  phd_outreach.log
 ```
 
-3. **Install dependencies**
-```bash
-pip install -r requirements.txt
+The app copies non-credential files from the old repository-root layout into `data/` on first run without overwriting newer local files. Before this upgrade, the existing database was copied byte-for-byte to `data/backups/` and its active copy was verified. Back up `data/` regularly. `PHD_AGENT_DATA_DIR` can point to another local directory; relative values are resolved from the repository root. A custom directory inside the repository must be under the ignored `data/` tree.
+
+The application ledger uses additive SQLite migrations recorded in `schema_migrations`. Slice 2 adds profile, claim, research track, catalogue, faculty verification, publication, and assessment tables without changing legacy professor rows. The approved Slice 1 baseline is backed up under `data/backups/phd_outreach-slice1-eefd5b8c.db`. Stop the app before any restore and keep a separate copy of the current database first; restoring the baseline discards later local work. Vault files under `data/documents/` need their own backup alongside the database.
+
+## Manual application workflow
+
+Open **Application CMS** in the sidebar. You can use it without an OpenAI key or Gmail authorization.
+
+1. Add an official source snapshot with its URL, excerpt, and verification state.
+2. Add a programme or opportunity, then create an application and record its next action.
+3. Add sourced application, funding, document, and referee deadlines. Add requirements with `FORMAL_APPLICATION`, `FACULTY_OUTREACH`, or `REPLY_REQUEST` context. Keep unresolved items `UNKNOWN`.
+4. Upload original files in **Document Vault**. Matching SHA-256 bytes show the existing version; source bytes are never overwritten. Review and approve a version, then link it to a matching requirement from the application detail screen. The same version can be linked to multiple applications.
+5. Add tasks and referees. The **Today** screen shows deadlines, missing required items, unknown requirements, overdue tasks, and document approval or expiry alerts.
+
+Administrative readiness is shown as separate counts: required items completed, unknown requirements, and conditional requirements. It is a document/process checklist, not an admission assessment. `PASSPORT` and `GOVERNMENT_ID` default to `HIGHLY_SENSITIVE` and are local-only. No cloud backend is active.
+
+Academic certificates and records marked `NEEDS_REVIEW` require a separate document type/authenticity review before approval. The original University of Liverpool MSc award certificate and Higher Education Achievement Report are in the active local Vault as confidential source versions. The HEAR contains transcript-like module results; whether a target institution accepts it as an unofficial transcript must be checked against that institution's rules. Neither is automatically linked to an application requirement.
+
+## Applicant truth and discovery workflow
+
+The **Applicant Truth** tab imports approved local CV/PDF/DOCX source versions, reads every PDF page or DOCX paragraph/table, and optionally calls OpenAI typed structured output to create *pending* claim candidates. Model extraction requires `OPENAI_API_KEY`; manual claims work without it. The existing local CV was imported into the Vault as a **pending** source, and its manually seeded claim candidates remain pending. Review the CV source version, inspect each claim and its page/location, correct wording and classification, then approve it for application and outreach independently. FACT and INFERENCE claims need linked evidence; facts need a verified review state. Approved profile snapshots preserve exact claim revisions and cannot be edited.
+
+The **Research Directions** tab holds draft or approved versions of proposed PhD directions. An approved version is immutable; editing makes a new draft version. Attach approved claims where a direction relies on past experience. Draft directions do not prove applicant expertise.
+
+The **Discovery** tab manages target institution states, official source URLs, evidence snapshots, opportunities, professors, and OpenAlex publications. Historical targets start as `CONSIDERING`, and all 156 historical professor rows were copied into separate `NEEDS_REVERIFICATION` faculty profiles. An old LLM score never upgrades a verification state. Static source pages are fetched and hashed when possible; manual snapshots retain a reviewed excerpt when a site blocks simple HTTP fetching. Source evidence and verification events are append-only. Evidence freshness is a review interval: 45 days for faculty affiliation/email, 3 for openings, 7 for deadlines, 14 for requirements/contact policy, and 30 for publication context.
+
+Search or enter an official programme, faculty, lab, or vacancy page; snapshot it; then review any candidate before adding a faculty profile or opportunity. `OPEN`, `CLOSED`, and `UNKNOWN` opportunity states are separate from publication activity. OpenAlex author search is available after institutional identity review; an operator must choose the author after comparing name, affiliation, subject area, and works. Independent publication pages can be linked when OpenAlex affiliation metadata is noisy. A paper never establishes a current opening. Discoveries can link to the application ledger, and conflicting programme, opportunity, deadline, or requirement data creates a review task instead of overwriting entered values. Research Fit and Application Readiness remain separate nullable fields with explicit unknowns.
+
+The ten-record pilot is reproducible with `python -m scripts.slice2_pilot --apply` after reviewing the linked official pages. The command is idempotent for records already reviewed. It creates draft research directions and one Stanford programme application opportunity, but no application, email, or submission. The remaining historical professor records require controlled review.
+
+## Reviewed matching, materials, and packages
+
+Slice 3 adds **Match Review**, **Materials**, and **Packages / Preflight** to Application CMS. Start in **Applicant Truth**: review source evidence for each claim, choose its application and outreach permissions, and create an approved profile snapshot. In **Research Directions**, review supporting claim IDs and approve a track version. The existing nine pending claims and three draft directions are not automatically approved. Returning an approved direction to draft creates a new version.
+
+Match Review computes a 0–10 Research Fit from five configurable, evidence-backed components and displays evidence coverage and unknown components. Application Readiness is a separate set of factual states, never an admission probability. Overrides and annotations create append-only review versions. A publication is research evidence, not evidence of an opening. Before faculty contact, record an explicit official policy such as `ALLOWED`, `CONTACT_ALLOWED`, or `DO_NOT_CONTACT`; unrecognized free text stays unknown.
+
+Materials supports approved, versioned Master CV sections and story modules. Each reusable bullet/module names approved claim revision IDs. Tailored CVs select or reorder reviewed sections and show the master-to-variant diff. Statements use approved story modules plus an exact sourced requirement. Proposals preserve an approved research direction and cite only stored, verified publications. A cover letter needs a required/optional sourced requirement or an intentional manual selection. Drafts keep editable text, PDF, generation context, claim/evidence IDs, model/template identifiers, and quality checks. Review each PDF and its evidence before approval; a new edit creates a new version. The local renderer and manual workflows work without an OpenAI key. Short content is visibly warned and needs human expansion/review for a competitive application.
+
+Packages use a deterministic rule for each requirement: `INCLUDE`, `EXCLUDE`, or `REVIEW`. `UNKNOWN` is always `REVIEW`. A required document must be linked to an approved Vault version before a package can be built. The builder freezes requirement/evidence snapshots, selected version IDs, SHA-256 hashes, decisions, and a manifest under `data/exports/<application>/package-vN/`. It can create a ZIP and an explicitly selected combined PDF while preserving the originals. The export is a convenience copy; the Vault remains canonical.
+
+Run preflight before marking a package ready. It checks the context, current requirements and evidence, files and hashes, limits, generated material lineage, citations, and relevant application or faculty conditions. Every rule has `PASS`, `WARNING`, or `BLOCK`, an affected record, and an operator action. A `BLOCK` prevents `READY`; `WARNING` remains visible for reviewer judgment. Formal packages also require the application deadline, route, eligibility, and referees. Outreach packages require current faculty affiliation, research evidence, verified email, and an explicitly allowed contact policy. **READY means reviewed materials only**: Slice 3 sends no email, submits no portal form, and stores no cloud documents. The legacy single-send controls are disabled until the later outreach safety workflow exists.
+
+The isolated demonstration can be reproduced from the approved local Slice 2 database with:
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.slice3_demo --source-db data/phd_outreach.db --output-dir data/slice3-demo-new --liverpool-results "C:\Users\aakas\OneDrive\Desktop\PHD documents\Aakash-Priyadarshi-liverpool-marksheet.pdf"
 ```
 
-4. **Environment setup**
-```bash
-# Create .env file
-echo "OPENAI_API_KEY=your_openai_api_key_here" > .env
-echo "USER_NAME=Your Full Name" >> .env
-echo "USER_EMAIL=your.email@example.com" >> .env
-```
+Choose a fresh output directory each run. The script copies the database and Vault into that ignored directory, then makes sandbox-only review decisions for the Stanford programme and Diyi Yang research scenario. It writes `demo-report.json` and a local package export. It never approves claims or adds applications to the active database. The Liverpool assessment-results PDF is marked `PROVISIONAL_TRANSCRIPT`; a missing Galgotias transcript is replaced only in the sandbox with a prominent `DEMO_ONLY` placeholder. Both force preflight `BLOCK` until genuine accepted transcripts are supplied. The demo also leaves eligibility, English applicability, referee submissions, and the fee unresolved. Review and replace these in the real CMS; do not submit the sandbox package.
 
-5. **Gmail API setup**
-   - Go to [Google Cloud Console](https://console.cloud.google.com/)
-   - Create a new project or select existing
-   - Enable Gmail API
-   - Create OAuth 2.0 credentials
-   - Download credentials as `credentials.json`
-   - Place in project root directory
+The original root copies of the 2025 runtime files were removed from the working tree after verified local copies were made. Git still contains their earlier versions in history. This branch does **not** rewrite Git history.
 
-6. **Run the application**
-```bash
-streamlit run streamlit_app.py
-```
+## Gmail setup and credential rotation
 
-## 📚 Usage Guide
+The old OAuth client file was tracked in the public repository and has been preserved locally under `data/backups/`, not in the active credentials path. Create a new Desktop OAuth client in your Google Cloud project, disable or delete the old client, and place the new downloaded JSON at `data/credentials.json`. Review and revoke the old app grant in your Google account if it is no longer needed. Google describes [creating a Desktop client and using JSON tokens](https://developers.google.com/workspace/gmail/api/quickstart/python) and [credential and token handling](https://developers.google.com/identity/protocols/oauth2/policies).
 
-### 🔧 **Initial Configuration**
+The app never loads the old `gmail_token.pickle`. After placing the rotated client JSON, run `.\.venv\Scripts\python.exe -m scripts.authorize_gmail` on Windows, or `.venv/bin/python -m scripts.authorize_gmail` elsewhere, to open an explicit local browser consent flow and create `data/gmail_token.json`. Treat the JSON token as a credential. It is not encrypted by this local release, so keep the data directory accessible only to your user account and protect the disk. If an old pickle token exists, remove it after you have confirmed the new authorization works. The new gateway requests Gmail send and read access; it will not start authorization by itself.
 
-1. **API Setup**
-   - Enter your OpenAI API key in the sidebar
-   - Configure your name and email in User Settings
-   - Verify Gmail connection status
+## Reviewed outreach (Slice 4)
 
-2. **CV Upload & Analysis**
-   - Upload your CV (PDF format)
-   - Click "Analyze CV" to generate research profile
-   - Review and customize the generated profile
+In **Application CMS → Outreach Review**, prepare an email only after approving a real applicant profile, an evidence-backed research direction, current professor identity/email/topic evidence, an explicitly allowed faculty contact route, and a ready `FACULTY_OUTREACH` document package. Sandbox approvals never populate the active applicant record. The draft uses a typed context and deterministic wording. Its snapshot freezes claim/evidence/paper IDs, exact email text, selected attachment versions and hashes, and quality-gate results. Editing creates another version; approval never sends immediately.
 
-### 🎯 **Professor Discovery (Stage 1)**
+Review the professor, relevant publication, applicant claim, full email, exact files, and each quality rule. Import the **complete** Gmail Sent metadata history in **Gmail Sent memory** and confirm possible matches. You can record a known historical contact or a reviewed `DO_NOT_CONTACT`/`REJECTED` state. Only an approved current package with reconciled Sent history and rotated Gmail credentials can be manually sent. The send action reads the complete Sent history again, reserves a unique local outreach key, and attaches only the approved hashed versions. If the Gmail result is uncertain, the package becomes `AMBIGUOUS_SEND`; use **Reconcile uncertain send** and inspect Sent before taking any further action. The app never retries that attempt automatically. Sent and reply metadata are stored locally without message bodies.
 
-1. **Target Universities**
-   - Add universities using the form
-   - Specify departments and priority levels
-   - Configure research focus areas
+Campaigns provide review-mode policies, pause/emergency controls, and saved dry runs that say `WOULD_GENERATE`, `WOULD_SEND`, or `BLOCKED` with reasons. `auto_send_enabled` defaults to false, and this slice has no automatic sending worker. Configure one target timezone per campaign; keep candidates in the same local zone when using send windows. Windows and daily caps apply to reviewed manual campaign sends. The isolated synthetic demonstration runs with `.\.venv\Scripts\python.exe -m scripts.slice4_demo --output-dir data/slice4-demo-fresh` (choose a fresh ignored directory). It does not contact Gmail or modify the active database.
 
-2. **Run Stage 1**
-   - Click "🔍 Run Stage 1" for cost-effective discovery
-   - Monitor progress in real-time
-   - Review discovered professors with alignment scores
+Legacy bulk send, generate-and-send, and individual send controls remain disabled. No portal application is submitted by this slice.
 
-### ✉️ **Email Generation (Stage 2)**
+## Current workflow
 
-1. **Individual Emails**
-   - Select verified professors
-   - Click "📧 Generate Email" for personalized content
-   - Preview and edit emails in modal interface
-   - Send individual emails with one click
+1. Upload or reuse a local CV, then generate the research profile.
+2. Add target universities or reuse the copied target list.
+3. Run Stage 1 discovery and inspect the results.
+4. Generate and edit an email for one professor.
+5. Review the draft locally; use only the approved Outreach Review package workflow for Gmail sending after credential rotation and Sent reconciliation.
 
-2. **Bulk Operations**
-   - Generate emails for all verified professors
-   - Send all drafted emails with customizable delays
-   - Complete generate & send automation
-
-### 📊 **Monitoring & Management**
-
-- **Cost Tracking**: Monitor API usage and costs
-- **Database Management**: Clean duplicate entries
-- **Progress Analytics**: Track email generation and sending
-- **Status Management**: Monitor professor verification states
-
-## 🏗️ Architecture
-
-### **Two-Stage System**
-```
-Stage 1 (Discovery) → GPT-4o-mini → Cost-effective professor finding
-Stage 2 (Emails)   → GPT-4       → High-quality personalized emails
-```
-
-### **Core Components**
-- **`streamlit_app.py`**: Main application interface and orchestration
-- **`gmail_manager.py`**: Gmail API integration and email handling
-- **Database**: SQLite for professor data and cost tracking
-- **API Manager**: OpenAI integration with cost monitoring
-- **Web Scraper**: University faculty page processing
-
-### **Data Flow**
-1. **CV Analysis** → Research Profile Generation
-2. **University Targeting** → Faculty Page Scraping
-3. **Professor Discovery** → Alignment Scoring
-4. **Email Generation** → Personalized Content Creation
-5. **Email Sending** → Gmail API Delivery
-
-## 📁 Project Structure
-
-```
-phd-apply-agent/
-├── streamlit_app.py           # Main application
-├── gmail_manager.py           # Gmail API integration
-├── requirements.txt           # Python dependencies
-├── credentials.json           # Gmail API credentials (not in repo)
-├── .env                      # Environment variables (not in repo)
-├── phd_outreach.db           # SQLite database
-├── uploaded_cv.pdf           # User's CV (generated)
-├── research_profile.txt      # Generated research profile
-├── test_db_structure.py      # Database testing utility
-├── test_persistence.py       # CV persistence testing
-└── README.md                 # This file
-```
-
-## 🔧 Configuration
-
-### **Environment Variables**
-```env
-OPENAI_API_KEY=your_openai_api_key
-USER_NAME=Your Full Name
-USER_EMAIL=your.email@example.com
-```
-
-### **Gmail API Setup**
-1. Enable Gmail API in Google Cloud Console
-2. Create OAuth 2.0 credentials
-3. Download as `credentials.json`
-4. First run will require browser authentication
-
-### **OpenAI Models**
-- **Stage 1**: `gpt-4o-mini` (cost-efficient discovery)
-- **Stage 2**: `gpt-4` (high-quality email generation)
-- **CV Analysis**: `gpt-4o-mini` (profile generation)
-
-## 💡 Tips & Best Practices
-
-### **Cost Optimization**
-- Use Stage 1 for bulk professor discovery
-- Generate emails selectively for high-alignment professors
-- Monitor costs in real-time via dashboard
-
-### **Email Quality**
-- Ensure comprehensive CV upload for better personalization
-- Review and customize generated emails before sending
-- Use appropriate sending delays to avoid rate limiting
-
-### **Data Management**
-- Regularly clean duplicate professors
-- Backup your database and research profile
-- Monitor email delivery status
-
-## 🚨 Troubleshooting
-
-### **Common Issues**
-
-**Gmail Authentication Errors**
-```bash
-# Re-authenticate Gmail
-rm gmail_token.pickle
-# Restart app and complete OAuth flow
-```
-
-**Database Errors**
-```bash
-# Run database structure test
-python test_db_structure.py
-```
-
-**CV Persistence Issues**
-```bash
-# Test CV and profile persistence
-python test_persistence.py
-```
-
-**JSON Parsing Errors**
-- Fixed in latest version with control character cleaning
-- Automatic fallback email extraction implemented
-
-## 🔒 Privacy & Security
-
-- **Local Processing**: All data stored locally in SQLite
-- **API Security**: Credentials stored securely with proper scoping
-- **Email Privacy**: Direct Gmail API integration, no third-party storage
-- **Research Data**: CV and profile data remains on your machine
-
-## 🤝 Contributing
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🆘 Support
-
-For support, please:
-1. Check the troubleshooting section
-2. Review existing GitHub issues
-3. Create a new issue with detailed description
-4. Include relevant logs and error messages
-
-## 🚀 Roadmap
-
-- [ ] Multi-language email templates
-- [ ] Advanced professor filtering
-- [ ] Email template customization
-- [ ] Integration with academic databases
-- [ ] Mobile-responsive interface
-- [ ] Advanced analytics dashboard
-
-## 🙏 Acknowledgments
-
-- OpenAI for GPT models
-- Google for Gmail API
-- Streamlit for the web framework
-- BeautifulSoup for web scraping capabilities
-
----
-
-**Made with ❤️ for aspiring PhD students worldwide**
-
-*Streamline your PhD applications with AI-powered automation*
+The 2025 discovery map is limited, and existing professor records need reverification for the new cycle. Do not treat an old `verified` status as current recruiting evidence.
