@@ -5,16 +5,25 @@ from __future__ import annotations
 import json
 import logging
 import tomllib
+from importlib.metadata import version
 from pathlib import Path
 
 import pytest
+import authlib
+import streamlit
 
 import gmail_manager
+import streamlit_app
 from phd_agent import launch
 from phd_agent.access import access_state
+from phd_agent.auth_dependencies import (
+    AUTHLIB_VERSION, STREAMLIT_VERSION, AuthDependencyError,
+    validate_auth_dependencies,
+)
 from phd_agent.config import GOOGLE_OIDC_METADATA, Settings, hosted_from_environ, load_settings, refuse_hosted_scripts
 from phd_agent.db import connect
 from phd_agent.documents import DocumentVault
+import phd_agent.runtime as runtime
 from phd_agent.runtime import LOG_FILE_HANDLER, StartupError, prepare_runtime, write_oidc_secrets
 from phd_agent.security import tracked_private_paths
 
@@ -49,6 +58,33 @@ def test_production_auth_is_required(tmp_path):
     assert settings.hosted is True
 
 
+def test_production_auth_dependencies_are_installed_and_pinned():
+    installed = validate_auth_dependencies()
+    assert installed == {"streamlit": STREAMLIT_VERSION, "Authlib": AUTHLIB_VERSION}
+    assert streamlit.__version__ == STREAMLIT_VERSION
+    assert version("Authlib") == AUTHLIB_VERSION
+    assert callable(streamlit.login)
+    assert authlib is not None
+    requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8").splitlines()
+    assert f"streamlit[auth]=={STREAMLIT_VERSION}" in requirements
+    assert f"Authlib=={AUTHLIB_VERSION}" in requirements
+
+
+def test_missing_auth_dependency_stops_before_database_or_secrets(tmp_path, monkeypatch):
+    volume = tmp_path / "volume"
+    volume.mkdir()
+    secrets = tmp_path / "secrets.toml"
+
+    def missing():
+        raise AuthDependencyError("Streamlit authentication dependencies are missing")
+
+    monkeypatch.setattr(runtime, "validate_auth_dependencies", missing)
+    with pytest.raises(StartupError, match="dependencies are missing"):
+        prepare_runtime(ROOT, _hosted_env(volume), secrets_path=secrets)
+    assert not (volume / "phd_outreach.db").exists()
+    assert not secrets.exists()
+
+
 def test_allowed_user_is_accepted(tmp_path):
     settings = load_settings(ROOT, _hosted_env(tmp_path))
     assert access_state(authenticated=True, email="Operator@example.com", settings=settings) == "allowed"
@@ -60,6 +96,45 @@ def test_unauthorized_user_is_rejected(tmp_path):
     assert access_state(authenticated=False, email=None, settings=settings) == "unauthenticated"
 
 
+@pytest.mark.parametrize(
+    ("logged_in", "email", "heading"),
+    ((False, None, "This application is private."),
+     (True, "other@example.com", "Not authorized")),
+)
+def test_operator_gate_stops_before_sensitive_ui(tmp_path, monkeypatch, logged_in, email, heading):
+    settings = load_settings(ROOT, _hosted_env(tmp_path))
+
+    class StopExecution(Exception):
+        pass
+
+    class GateUI:
+        user = type("User", (), {"is_logged_in": logged_in, "email": email})()
+
+        def __init__(self):
+            self.headings = []
+
+        def header(self, value):
+            self.headings.append(value)
+
+        @staticmethod
+        def write(_value):
+            return None
+
+        @staticmethod
+        def button(*_args, **_kwargs):
+            return False
+
+        @staticmethod
+        def stop():
+            raise StopExecution
+
+    gate = GateUI()
+    monkeypatch.setattr(streamlit_app, "st", gate)
+    with pytest.raises(StopExecution):
+        streamlit_app._operator_allowed(settings)
+    assert gate.headings == [heading]
+
+
 def test_production_cannot_silently_bypass_authentication(tmp_path):
     env = _hosted_env(tmp_path)
     env["PHD_AGENT_AUTH_DISABLED"] = "true"
@@ -68,8 +143,18 @@ def test_production_cannot_silently_bypass_authentication(tmp_path):
     railway = dict(env)
     railway.pop("PHD_AGENT_ENV")
     railway["RAILWAY_ENVIRONMENT"] = "production"
+    railway["PHD_AGENT_DATA_DIR"] = "/data"
     assert hosted_from_environ(railway) is True
     assert load_settings(ROOT, railway).auth_bypass is False
+
+
+def test_invalid_environment_fails_closed(tmp_path):
+    with pytest.raises(ValueError, match="development or production"):
+        load_settings(ROOT, {
+            "PHD_AGENT_ENV": "prodution",
+            "PHD_AGENT_DATA_DIR": str(tmp_path),
+            "PHD_AGENT_AUTH_DISABLED": "true",
+        })
 
 
 def test_railway_data_directory_must_be_absolute(tmp_path):
@@ -80,6 +165,18 @@ def test_railway_data_directory_must_be_absolute(tmp_path):
     env.pop("PHD_AGENT_DATA_DIR")
     with pytest.raises(ValueError, match="PHD_AGENT_DATA_DIR"):
         load_settings(ROOT, env)
+
+
+def test_railway_requires_data_volume_path(tmp_path):
+    env = _hosted_env(tmp_path)
+    env.pop("PHD_AGENT_ENV")
+    env["RAILWAY_ENVIRONMENT"] = "production"
+    with pytest.raises(ValueError, match="PHD_AGENT_DATA_DIR=/data"):
+        load_settings(ROOT, env)
+    env["PHD_AGENT_DATA_DIR"] = "/data"
+    settings = load_settings(ROOT, env)
+    assert settings.railway is True
+    assert str(settings.data_dir).replace("\\", "/").endswith("/data")
 
 
 def test_persistent_path_configuration(tmp_path):
@@ -233,6 +330,23 @@ def test_start_command_uses_port_env_and_health_route():
     assert "8501" not in argv
 
 
+def test_streamlit_cors_and_websocket_hosts_are_restricted():
+    config = tomllib.loads((ROOT / ".streamlit" / "config.toml").read_text(encoding="utf-8"))
+    server = config["server"]
+    assert server["enableCORS"] is True
+    assert server["enableXsrfProtection"] is True
+    assert server["corsAllowedOrigins"] == ["https://phd-agent-production.up.railway.app"]
+    assert "*" not in server["corsAllowedOrigins"]
+    assert "phd-agent-production.up.railway.app" in server["allowedHosts"]
+    assert "localhost" in server["allowedHosts"]
+    assert "127.0.0.1" in server["allowedHosts"]
+    assert "*" not in server["allowedHosts"]
+    assert streamlit.config.get_option("server.enableCORS") is True
+    assert streamlit.config.get_option("server.enableXsrfProtection") is True
+    assert streamlit.config.get_option("server.corsAllowedOrigins") == server["corsAllowedOrigins"]
+    assert streamlit.config.get_option("server.allowedHosts") == server["allowedHosts"]
+
+
 def test_launch_writes_oidc_secrets_before_exec(tmp_path):
     volume = tmp_path / "volume"
     volume.mkdir()
@@ -241,6 +355,13 @@ def test_launch_writes_oidc_secrets_before_exec(tmp_path):
     executed = []
 
     def fake_exec(file, args):
+        parsed = tomllib.loads((tmp_path / "secrets.toml").read_text(encoding="utf-8"))
+        assert parsed["auth"]["client_id"] == "test-client-id"
+        assert parsed["auth"]["client_secret"] == "test-client-secret"
+        assert parsed["auth"]["cookie_secret"] == "test-cookie-secret"
+        assert parsed["auth"]["redirect_uri"] == "https://example.invalid/oauth2callback"
+        assert parsed["auth"]["server_metadata_url"] == GOOGLE_OIDC_METADATA
+        assert "expose_tokens" not in parsed["auth"]
         executed.append((file, list(args)))
         raise SystemExit(0)
 
@@ -274,3 +395,41 @@ def test_oidc_secrets_are_written_without_network(tmp_path):
     parsed = tomllib.loads(dest.read_text(encoding="utf-8"))
     assert parsed["auth"]["client_id"] == "test-client-id"
     assert parsed["auth"]["server_metadata_url"] == GOOGLE_OIDC_METADATA
+    assert "expose_tokens" not in parsed["auth"]
+
+
+def test_production_oidc_urls_are_strict(tmp_path):
+    volume = tmp_path / "volume"
+    volume.mkdir()
+    env = _hosted_env(volume)
+    env["PHD_AGENT_OIDC_REDIRECT_URI"] = "https://phd-agent-production.up.railway.app/oauth2callback"
+    secrets = tmp_path / "secrets.toml"
+    prepare_runtime(ROOT, env, secrets_path=secrets)
+    parsed = tomllib.loads(secrets.read_text(encoding="utf-8"))
+    assert parsed["auth"]["redirect_uri"] == env["PHD_AGENT_OIDC_REDIRECT_URI"]
+    assert parsed["auth"]["server_metadata_url"] == GOOGLE_OIDC_METADATA
+    assert "expose_tokens" not in parsed["auth"]
+
+    bad_redirect = {**env, "PHD_AGENT_OIDC_REDIRECT_URI": "http://example.invalid/oauth2callback"}
+    with pytest.raises(StartupError, match="absolute HTTPS"):
+        _prepare(tmp_path, bad_redirect)
+    bad_metadata = {**env, "PHD_AGENT_OIDC_SERVER_METADATA_URL": "https://example.invalid/.well-known/openid-configuration"}
+    with pytest.raises(StartupError, match="Google"):
+        _prepare(tmp_path, bad_metadata)
+
+
+def test_cms_does_not_render_before_operator_authorization(tmp_path, monkeypatch):
+    settings = load_settings(ROOT, _hosted_env(tmp_path))
+    rendered = []
+
+    class PageOnly:
+        @staticmethod
+        def set_page_config(**_kwargs):
+            return None
+
+    monkeypatch.setattr(streamlit_app, "st", PageOnly())
+    monkeypatch.setattr(streamlit_app, "prepare_runtime", lambda: settings)
+    monkeypatch.setattr(streamlit_app, "_operator_allowed", lambda _settings: False)
+    monkeypatch.setattr(streamlit_app, "render_cms", lambda _path: rendered.append(True))
+    streamlit_app.main()
+    assert rendered == []
