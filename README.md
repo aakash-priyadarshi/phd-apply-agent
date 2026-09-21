@@ -31,7 +31,7 @@ streamlit run streamlit_app.py --server.address=0.0.0.0 --server.port=$PORT --se
 
 Full Railway steps, OIDC, volume backups, Gmail bootstrap, and rollback are in [docs/railway-deployment.md](docs/railway-deployment.md). Production uses `PHD_AGENT_DATA_DIR=/data` on one persistent volume. The CMS starts without OpenAI or Gmail. Auto-send stays disabled.
 
-For tests, install `requirements-dev.txt` in the same environment and run `python -m pytest -q`. Normal tests do not send email. The two Gmail integration tests require explicit environment flags and a test recipient.
+For tests, install `requirements-dev.txt` in the same environment, run `python -m phd_agent.auth_dependencies`, `python -m pip check`, and `python -m pytest -q`. Normal tests do not send email. The two Gmail integration tests require explicit environment flags and a test recipient.
 
 ## Local data
 

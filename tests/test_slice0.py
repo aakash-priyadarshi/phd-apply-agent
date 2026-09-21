@@ -127,6 +127,7 @@ def test_windows_acl_helper_uses_checked_icacls(tmp_path, monkeypatch):
 
     def fail_icacls(*args, **kwargs):
         assert args and args[0][0] == "icacls"
+        assert args[0][-1] == "tester:(F)"
         assert kwargs.get("check") is True
         raise subprocess.CalledProcessError(5, args[0])
 

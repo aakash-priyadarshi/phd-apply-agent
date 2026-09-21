@@ -45,7 +45,9 @@ def tracked_private_paths(root: Path = APP_ROOT) -> list[str]:
 def _restrict_windows_acl(path: Path) -> None:
     user = os.environ.get("USERNAME") or os.getlogin()
     subprocess.run(
-        ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:(R,W)"],
+        # Full control is scoped to the current user. DELETE permission is
+        # required for the atomic os.replace used by write_restricted_file.
+        ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:(F)"],
         check=True, capture_output=True,
     )
 

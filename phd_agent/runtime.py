@@ -5,9 +5,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Mapping
+from urllib.parse import urlsplit
 
+from phd_agent.auth_dependencies import AuthDependencyError, validate_auth_dependencies
 from phd_agent.config import GOOGLE_OIDC_METADATA, Settings, load_settings
 from phd_agent.db import connect, migrate
 from phd_agent.paths import APP_ROOT, ensure_data_layout
@@ -86,16 +89,44 @@ def write_oidc_secrets(destination: Path, environ: Mapping[str, str]) -> None:
         "cookie_secret": (environ.get("PHD_AGENT_OIDC_COOKIE_SECRET") or "").strip(),
         "client_id": (environ.get("PHD_AGENT_OIDC_CLIENT_ID") or "").strip(),
         "client_secret": (environ.get("PHD_AGENT_OIDC_CLIENT_SECRET") or "").strip(),
-        "server_metadata_url": (
-            (environ.get("PHD_AGENT_OIDC_SERVER_METADATA_URL") or "").strip()
-            or GOOGLE_OIDC_METADATA
-        ),
+        "server_metadata_url": GOOGLE_OIDC_METADATA,
     }
     lines = ["[auth]"]
     for key, value in values.items():
         lines.append(f"{key} = {json.dumps(value)}")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    destination.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    write_restricted_file(destination, "\n".join(lines) + "\n")
+
+
+def _validate_oidc_urls(settings: Settings, environ: Mapping[str, str]) -> None:
+    redirect = (environ.get("PHD_AGENT_OIDC_REDIRECT_URI") or "").strip()
+    parsed = urlsplit(redirect)
+    try:
+        _ = parsed.port
+    except ValueError as error:
+        raise StartupError("OIDC redirect URI contains an invalid port") from error
+    if (not parsed.hostname or parsed.username is not None or parsed.password is not None
+            or parsed.path != "/oauth2callback" or parsed.query or parsed.fragment):
+        raise StartupError("OIDC redirect URI must be an absolute /oauth2callback URL")
+    if settings.hosted and parsed.scheme != "https":
+        raise StartupError("OIDC redirect URI must be an absolute HTTPS /oauth2callback URL in production")
+    if not settings.hosted and parsed.scheme == "http":
+        try:
+            loopback = ip_address(parsed.hostname).is_loopback
+        except ValueError:
+            loopback = parsed.hostname.casefold() == "localhost"
+        if not loopback:
+            raise StartupError("HTTP OIDC redirect URI must use localhost or a loopback IP")
+    elif not settings.hosted and parsed.scheme != "https":
+        raise StartupError("OIDC redirect URI must use HTTPS or loopback HTTP in development")
+    railway_domain = (environ.get("RAILWAY_PUBLIC_DOMAIN") or "").strip().casefold()
+    if settings.railway and railway_domain and parsed.hostname.casefold() != railway_domain:
+        raise StartupError("OIDC redirect host does not match the Railway public domain")
+    metadata = (
+        (environ.get("PHD_AGENT_OIDC_SERVER_METADATA_URL") or "").strip()
+        or GOOGLE_OIDC_METADATA
+    )
+    if metadata != GOOGLE_OIDC_METADATA:
+        raise StartupError("OIDC server metadata URL must use Google's OpenID discovery endpoint")
 
 
 def require_auth_config(settings: Settings, environ: Mapping[str, str]) -> None:
@@ -106,6 +137,7 @@ def require_auth_config(settings: Settings, environ: Mapping[str, str]) -> None:
     missing = [key for key in OIDC_ENV if not (environ.get(key) or "").strip()]
     if missing:
         raise StartupError("OIDC configuration is incomplete")
+    _validate_oidc_urls(settings, environ)
 
 
 def check_sqlite_integrity(database_path: Path) -> None:
@@ -152,6 +184,12 @@ def prepare_runtime(
         settings = load_settings(root, env if environ is not None else None)
     except ValueError as error:
         raise StartupError(str(error)) from error
+    require_auth_config(settings, env)
+    if settings.require_auth:
+        try:
+            validate_auth_dependencies()
+        except AuthDependencyError as error:
+            raise StartupError(str(error)) from error
     if settings.hosted:
         if volume_unavailable(settings.data_dir, env):
             raise StartupError(
@@ -164,6 +202,11 @@ def prepare_runtime(
         ensure_data_layout(settings.data_dir, root)
         (settings.data_dir / "exports").mkdir(exist_ok=True)
         _writable(settings.data_dir)
+    if settings.require_auth:
+        try:
+            write_oidc_secrets(secrets_path or (root / ".streamlit" / "secrets.toml"), env)
+        except OSError as error:
+            raise StartupError("OIDC configuration could not be materialized") from error
     materialize_gmail_files(settings, env)
     migrate(settings.database_path)
     check_sqlite_integrity(settings.database_path)
@@ -171,9 +214,6 @@ def prepare_runtime(
     if not vault.is_dir():
         raise StartupError("Document Vault directory is not accessible")
     _writable(vault)
-    require_auth_config(settings, env)
-    if settings.require_auth:
-        write_oidc_secrets(secrets_path or (root / ".streamlit" / "secrets.toml"), env)
     try:
         tracked = tracked_private_paths(root)
     except GitInspectionFailed:

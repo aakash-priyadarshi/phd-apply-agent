@@ -39,7 +39,9 @@ def _truthy(value: str | None) -> bool:
 
 
 def _emails(value: str | None) -> tuple[str, ...]:
-    return tuple(part.strip().lower() for part in (value or "").split(",") if part.strip())
+    return tuple(dict.fromkeys(
+        part.strip().casefold() for part in (value or "").split(",") if part.strip()
+    ))
 
 
 def hosted_from_environ(environ: Mapping[str, str] | None = None) -> bool:
@@ -129,7 +131,7 @@ def load_settings(root: Path = APP_ROOT, environ: Mapping[str, str] | None = Non
         env = environ
     environment = (env.get("PHD_AGENT_ENV") or "development").strip().lower()
     if environment not in {"development", "production"}:
-        environment = "development"
+        raise ValueError("PHD_AGENT_ENV must be development or production")
     railway = bool(
         (env.get("RAILWAY_ENVIRONMENT") or "").strip()
         or (env.get("RAILWAY_PROJECT_ID") or "").strip()
@@ -140,8 +142,10 @@ def load_settings(root: Path = APP_ROOT, environ: Mapping[str, str] | None = Non
     if hosted:
         if not configured:
             raise ValueError("Hosted deployments require an absolute PHD_AGENT_DATA_DIR")
+        if railway and configured != "/data":
+            raise ValueError("Railway deployments require PHD_AGENT_DATA_DIR=/data")
         data_dir = Path(configured).expanduser()
-        if not data_dir.is_absolute():
+        if not data_dir.is_absolute() and not (railway and configured == "/data"):
             raise ValueError("PHD_AGENT_DATA_DIR must be an absolute persistent directory")
     else:
         data_dir = Path(configured).expanduser() if configured else root / "data"

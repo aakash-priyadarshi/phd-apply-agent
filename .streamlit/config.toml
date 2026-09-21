@@ -1,7 +1,9 @@
 [server]
 headless = true
-enableCORS = false
+enableCORS = true
 enableXsrfProtection = true
+corsAllowedOrigins = ["https://phd-agent-production.up.railway.app"]
+allowedHosts = ["phd-agent-production.up.railway.app", "localhost", "127.0.0.1"]
 
 [browser]
 gatherUsageStats = false

@@ -41,6 +41,11 @@ jobs:
       - name: Install test dependencies
         run: python -m pip install -r requirements-dev.txt
 
+      - name: Validate production dependencies
+        run: |
+          python -m phd_agent.auth_dependencies
+          python -m pip check
+
       - name: Run tests
         env:
           PHD_AGENT_SEND_REAL_EMAIL: "0"

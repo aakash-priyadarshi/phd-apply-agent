@@ -20,6 +20,8 @@ streamlit run streamlit_app.py --server.address=0.0.0.0 --server.port=$PORT --se
 
 Do not hard-code a port. Railway injects `PORT`. The wrapper is the `startCommand` in `railway.toml`.
 
+Startup also imports and validates the reviewed authentication runtime before touching the database. Production requirements install `streamlit[auth]==1.64.0` and `Authlib==1.8.0`; a missing or different authentication runtime stops the process with a safe configuration error instead of exposing a broken login button.
+
 Health checks use Streamlit’s built-in route `/_stcore/health`, also set in `railway.toml`. Railway only probes that path at deploy time. A volume-backed service still has brief downtime on redeploy because two deployments cannot mount the same volume.
 
 ## 1. Merge reviewed code to main
@@ -77,7 +79,9 @@ Set:
 | `PHD_AGENT_OIDC_REDIRECT_URI` | The `https://…/oauth2callback` URL |
 | `PHD_AGENT_OIDC_SERVER_METADATA_URL` | Defaults to Google’s OpenID configuration |
 
-At startup the app writes `.streamlit/secrets.toml` from these variables. That file is gitignored. Unauthenticated visitors and accounts outside `PHD_AGENT_ALLOWED_EMAILS` never see profile, documents, professor data, Gmail metadata, applications, backups, or archives.
+The redirect URI must be an absolute HTTPS URL ending exactly in `/oauth2callback`. The metadata URL is fixed to `https://accounts.google.com/.well-known/openid-configuration`; a different override is rejected. At startup the app writes `.streamlit/secrets.toml` with restricted file permissions from these variables. It does not expose ID or access tokens. That file is gitignored. Unauthenticated visitors and accounts outside `PHD_AGENT_ALLOWED_EMAILS` never see profile, documents, professor data, Gmail metadata, applications, backups, or archives.
+
+Streamlit CORS and XSRF protection remain enabled. The repository allowlists `https://phd-agent-production.up.railway.app` as the production origin and `phd-agent-production.up.railway.app` as the production WebSocket host. Localhost remains accepted by Streamlit 1.64 for local development. If the public domain changes, update `.streamlit/config.toml` and the Google redirect URI together before deploying.
 
 Give the service a public HTTPS domain. Do not expose it without this login gate.
 
