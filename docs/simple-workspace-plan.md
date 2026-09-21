@@ -22,11 +22,12 @@ The default product should feel like an assistant for one applicant, not a datab
 
 ## Document processing
 
-- Accept PDF, DOCX, TXT and Markdown.
+- Accept PDF, DOCX, TXT and Markdown up to 25 MB per file, with a separate expanded-size guard for DOCX archives.
 - Store source bytes once in the existing Vault.
 - Extract readable text and source-backed facts. Use configured structured extraction when available and deterministic local parsing as a fallback.
 - Create or refresh the approved profile snapshot, research direction, Master CV and ApplicantResearchContext in one operation.
-- Write `data/profile_summaries/applicant-profile-vN.md` and keep a generated copy in the Vault.
+- Write `data/profile_summaries/applicant-profile-pN-tN.md` and keep a generated copy in the Vault. Including both profile and research-direction versions prevents a focus-only update from replacing an earlier summary.
+- Store and parse transcripts and degree certificates immediately, but do not use them as approved profile evidence until their authenticity check is complete.
 - Adding documents creates a new context version only when applicant facts change; previous generated outputs remain immutable and receive the existing staleness marker.
 
 ## Delivery sequence

@@ -7,6 +7,7 @@ import io
 import json
 import os
 import re
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -41,6 +42,8 @@ class ProfileBuildResult:
 
 
 SUPPORTED_SUFFIXES = {".pdf", ".docx", ".txt", ".md"}
+MAX_PROFILE_DOCUMENT_BYTES = 25 * 1024 * 1024
+MAX_PROFILE_DOCX_EXPANDED_BYTES = 100 * 1024 * 1024
 PROFILE_DOCUMENT_TYPES = {
     "CV", "SOP", "PERSONAL_STATEMENT", "RESEARCH_PROPOSAL", "RESEARCH_STATEMENT",
     "DEGREE_CERTIFICATE", "TRANSCRIPT", "MARKSHEET", "ENGLISH_TEST",
@@ -95,11 +98,20 @@ def extract_text(data: bytes, filename: str) -> tuple[str, int, str]:
     suffix = Path(filename).suffix.casefold()
     if suffix not in SUPPORTED_SUFFIXES:
         raise ValueError(f"{filename}: use PDF, DOCX, TXT, or Markdown")
+    if len(data) > MAX_PROFILE_DOCUMENT_BYTES:
+        raise ValueError(f"{filename}: file exceeds the 25 MB profile-document limit")
     if suffix == ".pdf":
         pages = [page.extract_text() or "" for page in PdfReader(io.BytesIO(data)).pages]
         text = "\n\f\n".join(pages)
         method = "PyPDF2-all-pages"
     elif suffix == ".docx":
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                expanded_size = sum(entry.file_size for entry in archive.infolist())
+        except zipfile.BadZipFile as error:
+            raise ValueError(f"{filename}: invalid DOCX archive") from error
+        if expanded_size > MAX_PROFILE_DOCX_EXPANDED_BYTES:
+            raise ValueError(f"{filename}: expanded DOCX exceeds the 100 MB limit")
         document = DocxDocument(io.BytesIO(data))
         pieces = [paragraph.text for paragraph in document.paragraphs if paragraph.text.strip()]
         for table in document.tables:
@@ -198,7 +210,7 @@ class ProfileWorkspace:
                 ORDER BY d.id""" % ",".join("?" for _ in PROFILE_DOCUMENT_TYPES), tuple(sorted(PROFILE_DOCUMENT_TYPES)))]
 
     def latest_summary(self) -> tuple[Path, str] | None:
-        paths = sorted(self.summary_dir.glob("applicant-profile-v*.md"),
+        paths = sorted(self.summary_dir.glob("applicant-profile-*.md"),
                        key=lambda path: path.stat().st_mtime, reverse=True)
         if not paths:
             return None
@@ -237,10 +249,17 @@ class ProfileWorkspace:
 
     def _approve_document(self, version_id: int) -> None:
         version = self.vault.get_version(version_id)
+        if not version:
+            raise ValueError("Version does not exist")
+        if not self.vault.storage.verify_hash(version["storage_key"], version["sha256"]):
+            raise OSError("Cannot approve a missing or corrupt document version")
         if version["approval_state"] == "APPROVED":
             return
         if version["document_type"] in {"TRANSCRIPT", "DEGREE_CERTIFICATE"}:
-            self.vault.set_verification(version_id, "VERIFIED", self.reviewer)
+            if version["verification_state"] != "VERIFIED":
+                if version["verification_state"] != "NEEDS_REVIEW":
+                    self.vault.set_verification(version_id, "NEEDS_REVIEW", self.reviewer)
+                return
         self.vault.set_approval(version_id, True, self.reviewer)
 
     def _new_claims(self, profile_id: int, version_id: int, extraction_id: int, text: str,
@@ -339,9 +358,11 @@ class ProfileWorkspace:
         self.studio.review_master_cv(master_id, self.reviewer, True)
         return master_id
 
-    def _summary(self, owner_name: str, profile_version_id: int, research_focus: str,
+    def _summary(self, owner_name: str, profile_version_id: int, research_track_version_id: int,
+                 research_focus: str,
                  claims: list[dict], documents: list[dict]) -> tuple[Path, str]:
-        lines = [f"# Applicant profile — {owner_name}", "", f"_Profile version {profile_version_id}_", "",
+        lines = [f"# Applicant profile — {owner_name}", "",
+                 f"_Profile version {profile_version_id} · research direction version {research_track_version_id}_", "",
                  "## Research direction", "", research_focus.strip() or "To be refined for each application.", ""]
         by_category: dict[str, list[dict]] = {}
         for claim in claims:
@@ -363,11 +384,13 @@ class ProfileWorkspace:
                       "This summary is a readable index of source-backed applicant information. "
                       "Application documents and professor outreach still retrieve the relevant underlying claims and source files.", ""])
         markdown = "\n".join(lines)
-        path = self.summary_dir / f"applicant-profile-v{profile_version_id}.md"
+        path = self.summary_dir / (
+            f"applicant-profile-p{profile_version_id}-t{research_track_version_id}.md")
         path.write_text(markdown, encoding="utf-8")
         summary_upload = self.vault.upload(
             markdown.encode(), path.name, "GENERATED", "OTHER", "Applicant profile summary",
-            notes=f"Readable summary for profile version {profile_version_id}",
+            notes=(f"Readable summary for profile version {profile_version_id} and "
+                   f"research direction version {research_track_version_id}"),
         )
         self._approve_document(summary_upload["version_id"],)
         return path, markdown
@@ -377,14 +400,16 @@ class ProfileWorkspace:
         owner = owner_name.strip()
         if not owner:
             raise ValueError("Add your name so the profile can be created")
-        profile_id = self._profile_id(owner)
-        added = 0
-        warnings: list[str] = []
+        prepared_uploads: list[tuple[ProfileUpload, str]] = []
         for upload in uploads or []:
             if not upload.data:
                 continue
             text, _, _ = extract_text(upload.data, upload.name)
-            document_type = infer_document_type(upload.name, text)
+            prepared_uploads.append((upload, infer_document_type(upload.name, text)))
+        profile_id = self._profile_id(owner)
+        added = 0
+        warnings: list[str] = []
+        for upload, document_type in prepared_uploads:
             saved = self.vault.upload(
                 upload.data, upload.name, "SOURCE", document_type,
                 Path(upload.name).stem.replace("_", " ").replace("-", " ").strip().title(),
@@ -405,6 +430,12 @@ class ProfileWorkspace:
                 warnings.append(str(error))
                 continue
             extraction_id = self._record_extraction(document["version_id"], text, page_count, method)
+            current_version = self.vault.get_version(document["version_id"])
+            if current_version["approval_state"] != "APPROVED":
+                warnings.append(
+                    f"{document['original_filename']} is stored and parsed but will not supply profile facts "
+                    "until its academic-document review is complete.")
+                continue
             _, extraction_warnings = self._new_claims(
                 profile_id, document["version_id"], extraction_id, text, api_key=api_key)
             warnings.extend(extraction_warnings)
@@ -422,7 +453,8 @@ class ProfileWorkspace:
         master_cv_version_id = self._master_cv(profile_id, profile_version_id, claims)
         context = self.contexts.build(profile_version_id, master_cv_version_id, track_version_id)
         focus = context["context"]["research_track"]["title"]
-        summary_path, _ = self._summary(owner, profile_version_id, focus, claims, documents)
+        summary_path, _ = self._summary(
+            owner, profile_version_id, track_version_id, focus, claims, documents)
         return ProfileBuildResult(
             context["id"], profile_id, profile_version_id, master_cv_version_id,
             track_version_id, summary_path, added, len(claims), tuple(dict.fromkeys(warnings)),

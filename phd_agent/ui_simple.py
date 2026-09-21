@@ -81,6 +81,7 @@ def _profile_setup(path: Path) -> None:
         files = st.file_uploader(
             "Add CV and supporting documents",
             type=["pdf", "docx", "txt", "md"], accept_multiple_files=True,
+            max_upload_size=25,
             help="CV, degree, transcript, proposal, statement, publication or certificate. Existing files are reused.",
         )
         submitted = st.form_submit_button("Build my profile", type="primary", use_container_width=True)
@@ -90,9 +91,10 @@ def _profile_setup(path: Path) -> None:
             result = _run(lambda: workspace.build(
                 name, focus, uploads, api_key=os.getenv("OPENAI_API_KEY", "").strip()))
         if result:
-            st.success(f"Profile ready. It now uses {result.facts_in_profile} source-backed facts from your documents.")
-            for warning in result.warnings:
-                st.caption(warning)
+            st.session_state.simple_profile_notice = {
+                "message": f"Profile ready. It now uses {result.facts_in_profile} source-backed facts from your documents.",
+                "warnings": result.warnings,
+            }
             st.rerun()
     st.caption("PDF, DOCX, TXT and Markdown are supported. Highly sensitive identity documents should stay outside this profile builder.")
 
@@ -323,13 +325,18 @@ def _documents(path: Path, context: dict) -> None:
         focus = st.text_area("Research direction", value=workspace.suggested_focus(), height=80,
                              key="simple_docs_focus")
         files = st.file_uploader("Choose files", type=["pdf", "docx", "txt", "md"],
-                                 accept_multiple_files=True, key="simple_docs_upload")
+                                 accept_multiple_files=True, max_upload_size=25,
+                                 key="simple_docs_upload")
         if st.button("Update my profile", type="primary"):
             uploads = [ProfileUpload(file.name, file.getvalue()) for file in files]
             result = _run(lambda: workspace.build(
                 name, focus, uploads, api_key=os.getenv("OPENAI_API_KEY", "").strip()),
                 "Profile updated")
             if result:
+                st.session_state.simple_profile_notice = {
+                    "message": f"Profile updated with {result.facts_in_profile} source-backed facts.",
+                    "warnings": result.warnings,
+                }
                 st.rerun()
     st.subheader("Stored source documents")
     documents = workspace.source_documents()
@@ -338,7 +345,11 @@ def _documents(path: Path, context: dict) -> None:
     for document in documents:
         with st.container(border=True):
             st.write(f"**{document['original_filename']}**")
-            st.caption(document["document_type"].replace("_", " ").title() + " · Included in your profile")
+            document_type = document["document_type"].replace("_", " ").title()
+            if document["approval_state"] == "APPROVED":
+                st.caption(document_type + " · Included in your profile")
+            else:
+                st.caption(document_type + " · Stored safely · Academic-document check needed")
 
 
 def render_workspace(db_path: Path) -> None:
@@ -350,6 +361,11 @@ def render_workspace(db_path: Path) -> None:
         _profile_setup(db_path)
         return
     track = context["context"]["research_track"]["title"]
+    notice = st.session_state.pop("simple_profile_notice", None)
+    if notice:
+        st.success(notice["message"])
+        for warning in notice["warnings"]:
+            st.warning(warning)
     st.sidebar.markdown("### PhD Assistant")
     st.sidebar.markdown('<span class="ready-pill">Profile ready</span>', unsafe_allow_html=True)
     st.sidebar.caption(track)

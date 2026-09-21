@@ -1,13 +1,17 @@
 """Simple applicant-profile and task workspace regressions."""
 
+import io
+import zipfile
 from pathlib import Path
 
+import pytest
 from streamlit.testing.v1 import AppTest
 
+import phd_agent.profile_workspace as profile_workspace
 from phd_agent.applicant_context import ApplicantResearchContextService
 from phd_agent.db import connect, migrate
 from phd_agent.documents import DocumentVault
-from phd_agent.profile_workspace import ProfileUpload, ProfileWorkspace
+from phd_agent.profile_workspace import ProfileUpload, ProfileWorkspace, extract_text
 
 
 CV_TEXT = b"""Aakash Example
@@ -73,6 +77,68 @@ def test_adding_document_refreshes_profile_and_summary(tmp_path):
     assert second.context_id > first.context_id
     assert second.summary_path.name != first.summary_path.name
     assert "Published paper" in second.summary_path.read_text(encoding="utf-8")
+
+
+def test_research_focus_change_preserves_the_previous_summary(tmp_path):
+    workspace = ProfileWorkspace(tmp_path / "phd_outreach.db")
+    first = workspace.build("Aakash Example", "Reliable AI agents", [ProfileUpload("cv.txt", CV_TEXT)])
+    original = first.summary_path.read_text(encoding="utf-8")
+    second = workspace.build("Aakash Example", "Multimodal agent evaluation")
+    assert second.profile_version_id == first.profile_version_id
+    assert second.research_track_version_id != first.research_track_version_id
+    assert second.summary_path != first.summary_path
+    assert first.summary_path.read_text(encoding="utf-8") == original
+    assert "Multimodal agent evaluation" in second.summary_path.read_text(encoding="utf-8")
+
+
+def test_extract_text_rejects_oversized_files_and_expanded_docx(tmp_path, monkeypatch):
+    monkeypatch.setattr(profile_workspace, "MAX_PROFILE_DOCUMENT_BYTES", 20)
+    with pytest.raises(ValueError, match="profile-document limit"):
+        extract_text(b"x" * 21, "large.txt")
+
+    monkeypatch.setattr(profile_workspace, "MAX_PROFILE_DOCUMENT_BYTES", 1024)
+    monkeypatch.setattr(profile_workspace, "MAX_PROFILE_DOCX_EXPANDED_BYTES", 40)
+    archive_bytes = io.BytesIO()
+    with zipfile.ZipFile(archive_bytes, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("word/document.xml", "x" * 41)
+    with pytest.raises(ValueError, match="expanded DOCX"):
+        extract_text(archive_bytes.getvalue(), "expanded.docx")
+
+    monkeypatch.setattr(profile_workspace, "MAX_PROFILE_DOCUMENT_BYTES", 50)
+    database = tmp_path / "phd_outreach.db"
+    workspace = ProfileWorkspace(database)
+    with pytest.raises(ValueError, match="profile-document limit"):
+        workspace.build("Aakash Example", "Reliable AI", [
+            ProfileUpload("valid.txt", b"Research project: tested reliable AI agents."),
+            ProfileUpload("large.txt", b"x" * 51),
+        ])
+    with connect(database) as db:
+        assert db.execute("SELECT COUNT(*) FROM applicant_profiles").fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM documents").fetchone()[0] == 0
+
+
+def test_approved_document_is_hash_checked_before_reuse(tmp_path):
+    workspace = ProfileWorkspace(tmp_path / "phd_outreach.db")
+    workspace.build("Aakash Example", "Reliable AI agents", [ProfileUpload("cv.txt", CV_TEXT)])
+    document = workspace.source_documents()[0]
+    workspace.vault.storage._path(document["storage_key"]).write_bytes(b"corrupt")
+    with pytest.raises(OSError, match="missing or corrupt"):
+        workspace.build("Aakash Example", "Reliable AI agents")
+
+
+def test_academic_documents_wait_for_authenticity_review(tmp_path):
+    workspace = ProfileWorkspace(tmp_path / "phd_outreach.db")
+    result = workspace.build("Aakash Example", "Reliable AI agents", [
+        ProfileUpload("cv.txt", CV_TEXT),
+        ProfileUpload(
+            "transcript.txt", b"Official transcript for MSc Computer Science at Example University, grade distinction."),
+    ])
+    document = next(item for item in workspace.source_documents()
+                    if item["document_type"] == "TRANSCRIPT")
+    assert document["document_type"] == "TRANSCRIPT"
+    assert document["verification_state"] == "NEEDS_REVIEW"
+    assert document["approval_state"] == "PENDING"
+    assert any("stored and parsed" in warning for warning in result.warnings)
 
 
 def test_simple_workspace_renders_setup_then_task_navigation(tmp_path, monkeypatch):
