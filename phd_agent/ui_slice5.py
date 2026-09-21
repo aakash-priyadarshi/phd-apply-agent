@@ -121,11 +121,13 @@ def render_followthrough(path: Path):
                 submitted_at = st.text_input("Submission time (ISO)", value=utc_now())
                 payment = st.selectbox("Payment (user-recorded)", PAYMENT_STATES)
                 reference = st.text_input("Payment reference")
+                acknowledge_empty = st.checkbox(
+                    "This portal had no fields to record", value=False, key="archive_empty_checklist")
                 if st.button("Freeze submission archive"):
                     _act(lambda: portal.record_submission(
                         app_id, package_id, confirmation, submitted_at,
                         "Operator", payment_state=payment, payment_reference=reference or None,
-                        acknowledge_empty_checklist=True),
+                        acknowledge_empty_checklist=acknowledge_empty),
                         "Submission archived. The app did not contact the portal.")
         with connect(path) as db:
             archives = [dict(r) for r in db.execute("SELECT * FROM submission_archives ORDER BY id DESC")]

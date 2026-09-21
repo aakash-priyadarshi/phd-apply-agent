@@ -2,7 +2,10 @@
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+
+import phd_agent.replies as replies_mod
 
 import pytest
 
@@ -136,6 +139,29 @@ def test_bounce_marks_sent_package_without_contacting_gmail(case):
     assert case["outreach"].get_package(package)["status"] == "BOUNCED"
 
 
+def test_follow_up_skips_event_when_sent_row_is_not_updated(case, monkeypatch):
+    package, _ = _send(case)
+    intel = ReplyIntelligence(case["path"])
+    real_transaction = replies_mod.transaction
+
+    @contextmanager
+    def flip_status(path):
+        with connect(path) as db:
+            db.execute("UPDATE outreach_packages SET status='REPLIED' WHERE id=?", (package,))
+            db.commit()
+        with real_transaction(path) as db:
+            yield db
+
+    monkeypatch.setattr(replies_mod, "transaction", flip_status)
+    due = intel.mark_follow_ups_due(now=datetime.now(timezone.utc) + timedelta(days=20))
+    assert due == []
+    assert case["outreach"].get_package(package)["status"] == "REPLIED"
+    with connect(case["path"]) as db:
+        events = [r["event"] for r in db.execute(
+            "SELECT event FROM outreach_events WHERE package_id=?", (package,))]
+    assert "FOLLOW_UP_DUE" not in events
+
+
 def test_follow_up_draft_after_delay_stays_unsent(case):
     package, _ = _send(case)
     intel = ReplyIntelligence(case["path"])
@@ -216,6 +242,17 @@ def test_portal_answers_checklist_and_frozen_submission_archive(case):
             db.execute("UPDATE submission_archives SET confirmation_number='tampered' WHERE id=?", (archive_id,))
 
 
+def test_empty_portal_checklist_requires_operator_acknowledgement(case):
+    portal = PortalAssistance(case["path"], case["vault"])
+    package_id = _ready_formal(case)
+    with pytest.raises(ValueError, match="no fields"):
+        portal.record_submission(case["app"], package_id, "CONF-EMPTY", utc_now(), "Test reviewer")
+    archive_id = portal.record_submission(
+        case["app"], package_id, "CONF-EMPTY", utc_now(), "Test reviewer",
+        acknowledge_empty_checklist=True)
+    assert portal.get_archive(archive_id)["confirmation_number"] == "CONF-EMPTY"
+
+
 def test_backup_excludes_credentials_and_restores_vault_bytes(tmp_path):
     data = tmp_path / "data"
     data.mkdir()
@@ -238,6 +275,46 @@ def test_backup_excludes_credentials_and_restores_vault_bytes(tmp_path):
     with pytest.raises(FileExistsError):
         service.restore(archive, dest, "Tester")
     service.restore(archive, dest, "Tester", replace_existing=True)
+
+
+def test_restore_rejects_escaped_manifest_paths(tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    db = data / "phd_outreach.db"
+    DocumentVault(db)
+    service = BackupService(db, data)
+    archive = tmp_path / "backup-escape"
+    service.create_backup(archive, "Tester")
+    manifest_path = archive / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    dest = tmp_path / "restored-escape"
+    for escaped in ("../escaped.txt", "/tmp/escaped.txt"):
+        tampered = dict(manifest)
+        tampered["files"] = list(manifest["files"]) + [{"path": escaped, "sha256": "0" * 64}]
+        manifest_path.write_text(json.dumps(tampered), encoding="utf-8")
+        with pytest.raises(ValueError, match="escapes"):
+            service.restore(archive, dest, "Tester")
+        assert not dest.exists()
+
+
+def test_restore_replace_existing_removes_stale_files(tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    db = data / "phd_outreach.db"
+    vault = DocumentVault(db)
+    uploaded = vault.upload(b"vault-bytes", "note.txt", "SOURCE", "OTHER", "Note")
+    service = BackupService(db, data)
+    archive = tmp_path / "backup-stale"
+    service.create_backup(archive, "Tester")
+    dest = tmp_path / "restored-stale"
+    service.restore(archive, dest, "Tester")
+    (dest / "credentials.json").write_text('{"stale":true}', encoding="utf-8")
+    (dest / "not-in-manifest.txt").write_text("leftover", encoding="utf-8")
+    service.restore(archive, dest, "Tester", replace_existing=True)
+    assert not (dest / "credentials.json").exists()
+    assert not (dest / "not-in-manifest.txt").exists()
+    restored_vault = DocumentVault(dest / "phd_outreach.db")
+    assert restored_vault.storage.get(uploaded["storage_key"]) == b"vault-bytes"
 
 
 def test_slice5_migration_is_applied(tmp_path):

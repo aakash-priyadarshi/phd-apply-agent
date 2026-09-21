@@ -147,8 +147,11 @@ class ReplyIntelligence:
             if now < sent + timedelta(days=delay):
                 continue
             with transaction(self.db_path) as db:
-                db.execute("UPDATE outreach_packages SET status='FOLLOW_UP_DUE' WHERE id=? AND status='SENT'",
-                           (row["id"],))
+                changed = db.execute(
+                    "UPDATE outreach_packages SET status='FOLLOW_UP_DUE' WHERE id=? AND status='SENT'",
+                    (row["id"],))
+                if changed.rowcount != 1:
+                    continue
                 self.outreach._event(db, row["id"], None, "FOLLOW_UP_DUE", "SENT", "FOLLOW_UP_DUE", "SYSTEM")
             marked.append(row["id"])
         return marked

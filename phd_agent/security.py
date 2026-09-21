@@ -48,7 +48,7 @@ def restrict_private_file(path: Path) -> None:
         user = os.environ.get("USERNAME") or os.getlogin()
         subprocess.run(
             ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:(R,W)"],
-            check=False, capture_output=True,
+            check=True, capture_output=True,
         )
         return
     os.chmod(path, 0o600)

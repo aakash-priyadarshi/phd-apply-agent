@@ -28,6 +28,24 @@ def _dump(value) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _private_mkdir(path: Path) -> None:
+    path.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+
+def _contained_path(root: Path, relative) -> Path:
+    if not isinstance(relative, str) or not relative.strip() or relative.strip() != relative:
+        raise ValueError("Backup path is missing or padded")
+    candidate = Path(relative)
+    if (candidate.is_absolute() or candidate.drive or candidate.root or not candidate.parts
+            or any(part in {".", ".."} for part in candidate.parts)):
+        raise ValueError("Backup path escapes the archive")
+    root = root.resolve()
+    resolved = (root / candidate).resolve()
+    if not resolved.is_relative_to(root):
+        raise ValueError("Backup path escapes the archive")
+    return resolved
+
+
 class BackupService:
     def __init__(self, db_path: Path | str, data_dir: Path | str | None = None):
         self.db_path = Path(db_path)
@@ -42,7 +60,7 @@ class BackupService:
         destination = Path(destination)
         if destination.exists():
             raise FileExistsError("Choose a new backup directory")
-        destination.mkdir(parents=True)
+        _private_mkdir(destination)
         db_copy = destination / "phd_outreach.db"
         source = sqlite3.connect(str(self.db_path))
         try:
@@ -59,8 +77,8 @@ class BackupService:
         if vault_root.is_dir():
             for path in sorted(p for p in vault_root.rglob("*") if p.is_file()):
                 relative = path.relative_to(self.data_dir)
-                target = destination / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
+                target = _contained_path(destination, relative.as_posix())
+                _private_mkdir(target.parent)
                 shutil.copy2(path, target)
                 files.append({"path": relative.as_posix(), "sha256": _digest(target)})
         excluded = []
@@ -68,8 +86,10 @@ class BackupService:
             for name in sorted(CREDENTIAL_NAMES):
                 source_file = self.data_dir / name
                 if source_file.is_file():
-                    shutil.copy2(source_file, destination / name)
-                    files.append({"path": name, "sha256": _digest(destination / name)})
+                    target = _contained_path(destination, name)
+                    shutil.copy2(source_file, target)
+                    restrict_private_file(target)
+                    files.append({"path": name, "sha256": _digest(target)})
         else:
             excluded = sorted(name for name in CREDENTIAL_NAMES if (self.data_dir / name).is_file())
         manifest = {
@@ -103,24 +123,31 @@ class BackupService:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         if _digest(db_copy) != manifest["db_sha256"]:
             raise ValueError("Backup database hash does not match the manifest")
+        verified = []
         for item in manifest.get("files", []):
-            path = archive / item["path"]
+            path = _contained_path(archive, item.get("path"))
             if not path.is_file() or _digest(path) != item["sha256"]:
-                raise ValueError("Backup file hash does not match the manifest: " + item["path"])
-        destination_dir.mkdir(parents=True, exist_ok=True)
+                raise ValueError("Backup file hash does not match the manifest: " + str(item.get("path")))
+            verified.append(item)
         target_db = destination_dir / "phd_outreach.db"
-        if target_db.exists() and not replace_existing:
+        dest_occupied = destination_dir.exists() and any(destination_dir.iterdir())
+        if dest_occupied and not replace_existing:
             raise FileExistsError("Destination database exists; pass replace_existing to overwrite")
+        if dest_occupied:
+            shutil.rmtree(destination_dir)
+        _private_mkdir(destination_dir)
         shutil.copy2(db_copy, target_db)
         restrict_private_file(target_db)
         restored = []
-        for item in manifest.get("files", []):
+        for item in verified:
             if Path(item["path"]).name in CREDENTIAL_NAMES and not manifest.get("include_credentials"):
                 continue
-            source = archive / item["path"]
-            target = destination_dir / item["path"]
-            target.parent.mkdir(parents=True, exist_ok=True)
+            source = _contained_path(archive, item["path"])
+            target = _contained_path(destination_dir, item["path"])
+            _private_mkdir(target.parent)
             shutil.copy2(source, target)
+            if Path(item["path"]).name in CREDENTIAL_NAMES:
+                restrict_private_file(target)
             restored.append(item["path"])
         record = {
             "restored_at": utc_now(),
