@@ -42,14 +42,18 @@ def tracked_private_paths(root: Path = APP_ROOT) -> list[str]:
     return private
 
 
+def _restrict_windows_acl(path: Path) -> None:
+    user = os.environ.get("USERNAME") or os.getlogin()
+    subprocess.run(
+        ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:(R,W)"],
+        check=True, capture_output=True,
+    )
+
+
 def restrict_private_file(path: Path) -> None:
     path = Path(path)
     if os.name == "nt":
-        user = os.environ.get("USERNAME") or os.getlogin()
-        subprocess.run(
-            ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:(R,W)"],
-            check=False, capture_output=True,
-        )
+        _restrict_windows_acl(path)
         return
     os.chmod(path, 0o600)
 
@@ -59,12 +63,20 @@ def write_restricted_file(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=str(path.parent))
     try:
+        # Restrict the temporary file before credential bytes are written.
+        restrict_private_file(Path(tmp_name))
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            fd = None
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp_name, path)
     except Exception:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
         try:
             os.unlink(tmp_name)
         except OSError:

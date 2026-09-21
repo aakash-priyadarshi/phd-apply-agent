@@ -1,5 +1,7 @@
 """Safety checks for the 2026–27 baseline upgrade."""
 
+import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -88,6 +90,49 @@ def test_git_inspection_failure_is_explicit(monkeypatch, tmp_path):
     monkeypatch.setattr(security.subprocess, "run", boom)
     with pytest.raises(security.GitInspectionFailed):
         security.tracked_private_paths(tmp_path)
+
+
+def test_write_restricted_file_protects_temp_before_secret_bytes(tmp_path, monkeypatch):
+    snapshots = []
+    real = security.restrict_private_file
+
+    def spy(path):
+        snapshots.append(Path(path).read_text(encoding="utf-8"))
+        real(path)
+
+    monkeypatch.setattr(security, "restrict_private_file", spy)
+    dest = tmp_path / "gmail_token.json"
+    security.write_restricted_file(dest, '{"token":"secret"}')
+    assert snapshots[0] == ""
+    assert snapshots[-1] == '{"token":"secret"}'
+    assert dest.read_text(encoding="utf-8") == '{"token":"secret"}'
+
+
+def test_write_restricted_file_aborts_when_restriction_fails(tmp_path, monkeypatch):
+    def boom(path):
+        raise subprocess.CalledProcessError(5, "icacls")
+
+    monkeypatch.setattr(security, "restrict_private_file", boom)
+    dest = tmp_path / "gmail_token.json"
+    with pytest.raises(subprocess.CalledProcessError):
+        security.write_restricted_file(dest, '{"token":"secret"}')
+    assert not dest.exists()
+    assert not list(tmp_path.glob("gmail_token.json*"))
+
+
+def test_windows_acl_helper_uses_checked_icacls(tmp_path, monkeypatch):
+    dest = tmp_path / "gmail_token.json"
+    dest.write_text("token", encoding="utf-8")
+    monkeypatch.setenv("USERNAME", "tester")
+
+    def fail_icacls(*args, **kwargs):
+        assert args and args[0][0] == "icacls"
+        assert kwargs.get("check") is True
+        raise subprocess.CalledProcessError(5, args[0])
+
+    monkeypatch.setattr(security.subprocess, "run", fail_icacls)
+    with pytest.raises(subprocess.CalledProcessError):
+        security._restrict_windows_acl(dest)
 
 
 def test_gmail_writes_json_token_without_loading_pickle(tmp_path, monkeypatch):
