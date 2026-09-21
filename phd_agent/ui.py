@@ -57,6 +57,25 @@ def render_today(ledger: Ledger):
     cols = st.columns(len(counts))
     for col, (label, count) in zip(cols, counts):
         col.metric(label, count)
+    from phd_agent.db import connect
+    with connect(ledger.db_path) as db:
+        outreach_counts = {r[0]:r[1] for r in db.execute(
+            "SELECT status,COUNT(*) FROM outreach_packages GROUP BY status")}
+        paused = db.execute("SELECT COUNT(*) FROM campaigns WHERE status IN ('PAUSED','STOPPED') OR emergency_stop=1").fetchone()[0]
+        replies = db.execute("SELECT COUNT(*) FROM reply_events WHERE detected_state='NEW'").fetchone()[0]
+        stale = db.execute("SELECT COUNT(*) FROM outreach_packages WHERE stale_at IS NOT NULL AND status IN ('APPROVED','SCHEDULED')").fetchone()[0]
+    outreach_labels = [
+        ("Outreach review", outreach_counts.get("NEEDS_REVIEW",0)),
+        ("Blocked outreach", outreach_counts.get("BLOCKED",0)),
+        ("Scheduled", outreach_counts.get("SCHEDULED",0)),
+        ("Ambiguous sends", outreach_counts.get("AMBIGUOUS_SEND",0)),
+        ("New replies", replies),
+        ("Stale packages", stale),
+        ("Paused / stopped campaigns", paused),
+    ]
+    st.markdown("#### Outreach today")
+    for col,(label,count) in zip(st.columns(len(outreach_labels)),outreach_labels):
+        col.metric(label,count)
 
     st.markdown("#### Upcoming deadlines")
     if data["upcoming_deadlines"]:
@@ -547,10 +566,23 @@ def render_vault(vault: DocumentVault):
     st.dataframe([{
         "Version ID": v["id"], "Version": v["version_number"],
         "Original filename": v["original_filename"], "Bytes": v["byte_size"],
-        "SHA-256": v["sha256"], "Approval": v["approval_state"],
+        "SHA-256": v["sha256"], "Verification": v["verification_state"],
+        "Approval": v["approval_state"],
         "Uploaded": v["uploaded_at"],
     } for v in versions], width='stretch', hide_index=True)
     for version in versions:
+        if doc["document_class"] == "SOURCE":
+            verification = st.selectbox(f"Verification for version {version['version_number']}",
+                ["NEEDS_REVIEW","UNVERIFIED","VERIFIED"],
+                index=["NEEDS_REVIEW","UNVERIFIED","VERIFIED"].index(version["verification_state"]),
+                key=f"cms_verify_state_{version['id']}")
+            reviewer = st.text_input(f"Verification reviewer for version {version['version_number']}",
+                key=f"cms_verify_reviewer_{version['id']}")
+            if st.button(f"Save verification review for version {version['version_number']}",
+                         key=f"cms_verify_{version['id']}"):
+                if _run(lambda v=version: vault.set_verification(v["id"],verification,reviewer),
+                        "Verification state updated") is not None:
+                    st.rerun()
         col_a, col_b = st.columns(2)
         with col_a:
             approved = version["approval_state"] == "APPROVED"
@@ -574,14 +606,15 @@ def render_vault(vault: DocumentVault):
 def render_cms(db_path: Path):
     from phd_agent.ui_slice2 import render_discovery, render_tracks, render_truth
     from phd_agent.ui_slice3 import render_match_review, render_materials, render_packages
+    from phd_agent.ui_slice4 import render_outreach
 
     ledger = Ledger(db_path)
     vault = DocumentVault(db_path)
     st.title("PhD applications")
     st.caption("Local application ledger, reviewed applicant truth, research matching, materials, packages, and preflight")
-    today, applications, documents, truth, tracks, discovery, matches, materials, packages = st.tabs([
+    today, applications, documents, truth, tracks, discovery, matches, materials, packages, outreach = st.tabs([
         "Today", "Applications", "Document Vault", "Applicant Truth", "Research Directions", "Discovery",
-        "Match Review", "Materials", "Packages & Preflight",
+        "Match Review", "Materials", "Packages & Preflight", "Outreach Review",
     ])
     with today:
         render_today(ledger)
@@ -601,3 +634,5 @@ def render_cms(db_path: Path):
         render_materials(db_path)
     with packages:
         render_packages(db_path)
+    with outreach:
+        render_outreach(db_path)

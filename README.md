@@ -1,6 +1,6 @@
 # PhD application and outreach console
 
-This is a local Streamlit application with an application ledger, Document Vault, versioned applicant truth library, research directions, and source-backed discovery. The earlier CV analysis, professor discovery, email drafting/editing, and individual Gmail sender remain available under **Legacy outreach**. The [2026–27 implementation plan](docs/implementation-plan-2026-27.md) describes the staged work.
+This is a local Streamlit application with an application ledger, Document Vault, versioned applicant truth library, research directions, source-backed discovery, and a reviewed faculty outreach queue. The earlier CV analysis, professor discovery, and email drafting/editing remain available under **Legacy outreach**; its sending controls are disabled. The [2026–27 implementation plan](docs/implementation-plan-2026-27.md) describes the staged work.
 
 ## Run locally
 
@@ -51,6 +51,8 @@ Open **Application CMS** in the sidebar. You can use it without an OpenAI key or
 
 Administrative readiness is shown as separate counts: required items completed, unknown requirements, and conditional requirements. It is a document/process checklist, not an admission assessment. `PASSPORT` and `GOVERNMENT_ID` default to `HIGHLY_SENSITIVE` and are local-only. No cloud backend is active.
 
+Academic certificates and records marked `NEEDS_REVIEW` require a separate document type/authenticity review before approval. The original University of Liverpool MSc award certificate and Higher Education Achievement Report are in the active local Vault as confidential source versions. The HEAR contains transcript-like module results; whether a target institution accepts it as an unofficial transcript must be checked against that institution's rules. Neither is automatically linked to an application requirement.
+
 ## Applicant truth and discovery workflow
 
 The **Applicant Truth** tab imports approved local CV/PDF/DOCX source versions, reads every PDF page or DOCX paragraph/table, and optionally calls OpenAI typed structured output to create *pending* claim candidates. Model extraction requires `OPENAI_API_KEY`; manual claims work without it. The existing local CV was imported into the Vault as a **pending** source, and its manually seeded claim candidates remain pending. Review the CV source version, inspect each claim and its page/location, correct wording and classification, then approve it for application and outreach independently. FACT and INFERENCE claims need linked evidence; facts need a verified review state. Approved profile snapshots preserve exact claim revisions and cannot be edited.
@@ -89,9 +91,17 @@ The original root copies of the 2025 runtime files were removed from the working
 
 The old OAuth client file was tracked in the public repository and has been preserved locally under `data/backups/`, not in the active credentials path. Create a new Desktop OAuth client in your Google Cloud project, disable or delete the old client, and place the new downloaded JSON at `data/credentials.json`. Review and revoke the old app grant in your Google account if it is no longer needed. Google describes [creating a Desktop client and using JSON tokens](https://developers.google.com/workspace/gmail/api/quickstart/python) and [credential and token handling](https://developers.google.com/identity/protocols/oauth2/policies).
 
-The app never loads the old `gmail_token.pickle`. Gmail authorization creates `data/gmail_token.json`; treat it as a credential. The JSON token is not encrypted by this local release, so keep the data directory accessible only to your user account and protect the disk. If an old pickle token exists, remove it after you have confirmed the new authorization works. The app currently requests Gmail send and read access; read access supports connection status and the planned sent-history reconciliation.
+The app never loads the old `gmail_token.pickle`. After placing the rotated client JSON, run `\.venv\Scripts\python.exe -m scripts.authorize_gmail` on Windows, or `.venv/bin/python -m scripts.authorize_gmail` elsewhere, to open an explicit local browser consent flow and create `data/gmail_token.json`. Treat the JSON token as a credential. It is not encrypted by this local release, so keep the data directory accessible only to your user account and protect the disk. If an old pickle token exists, remove it after you have confirmed the new authorization works. The new gateway requests Gmail send and read access; it will not start authorization by itself.
 
-Bulk send, generate-and-send, and individual send controls are disabled in this release. The reviewed outreach queue, factuality gate, and Gmail history protection are later slices.
+## Reviewed outreach (Slice 4)
+
+In **Application CMS → Outreach Review**, prepare an email only after approving a real applicant profile, an evidence-backed research direction, current professor identity/email/topic evidence, an explicitly allowed faculty contact route, and a ready `FACULTY_OUTREACH` document package. Sandbox approvals never populate the active applicant record. The draft uses a typed context and deterministic wording. Its snapshot freezes claim/evidence/paper IDs, exact email text, selected attachment versions and hashes, and quality-gate results. Editing creates another version; approval never sends immediately.
+
+Review the professor, relevant publication, applicant claim, full email, exact files, and each quality rule. Import the **complete** Gmail Sent metadata history in **Gmail Sent memory** and confirm possible matches. You can record a known historical contact or a reviewed `DO_NOT_CONTACT`/`REJECTED` state. Only an approved current package with reconciled Sent history and rotated Gmail credentials can be manually sent. The send action reads the complete Sent history again, reserves a unique local outreach key, and attaches only the approved hashed versions. If the Gmail result is uncertain, the package becomes `AMBIGUOUS_SEND`; use **Reconcile uncertain send** and inspect Sent before taking any further action. The app never retries that attempt automatically. Sent and reply metadata are stored locally without message bodies.
+
+Campaigns provide review-mode policies, pause/emergency controls, and saved dry runs that say `WOULD_GENERATE`, `WOULD_SEND`, or `BLOCKED` with reasons. `auto_send_enabled` defaults to false, and this slice has no automatic sending worker. Configure one target timezone per campaign; keep candidates in the same local zone when using send windows. Windows and daily caps apply to reviewed manual campaign sends. The isolated synthetic demonstration runs with `\.venv\Scripts\python.exe -m scripts.slice4_demo --output-dir data/slice4-demo-fresh` (choose a fresh ignored directory). It does not contact Gmail or modify the active database.
+
+Legacy bulk send, generate-and-send, and individual send controls remain disabled. No portal application is submitted by this slice.
 
 ## Current workflow
 
@@ -99,6 +109,6 @@ Bulk send, generate-and-send, and individual send controls are disabled in this 
 2. Add target universities or reuse the copied target list.
 3. Run Stage 1 discovery and inspect the results.
 4. Generate and edit an email for one professor.
-5. Review the draft locally; sending is disabled until the later outreach workflow is approved.
+5. Review the draft locally; use only the approved Outreach Review package workflow for Gmail sending after credential rotation and Sent reconciliation.
 
 The 2025 discovery map is limited, and existing professor records need reverification for the new cycle. Do not treat an old `verified` status as current recruiting evidence.

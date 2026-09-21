@@ -262,6 +262,8 @@ class DocumentVault:
         version = self.get_version(version_id)
         if not version:
             raise ValueError("Version does not exist")
+        if approved and version["document_type"] in {"TRANSCRIPT", "DEGREE_CERTIFICATE"} and version["verification_state"] == "NEEDS_REVIEW":
+            raise ValueError("Review academic-document authenticity and type before approval")
         if approved and not self.storage.verify_hash(version["storage_key"], version["sha256"]):
             raise OSError("Cannot approve a missing or corrupt document version")
         with transaction(self.db_path) as db:
@@ -274,6 +276,20 @@ class DocumentVault:
             ))
             if cursor.rowcount != 1:
                 raise ValueError("Version does not exist")
+
+    def set_verification(self, version_id: int, state: str, reviewer: str) -> None:
+        if state not in {"UNVERIFIED", "VERIFIED", "NEEDS_REVIEW"} or not reviewer.strip():
+            raise ValueError("Verification state and reviewer required")
+        with transaction(self.db_path) as db:
+            version = db.execute("""SELECT v.notes,d.document_class FROM document_versions v
+                JOIN documents d ON d.id=v.document_id WHERE v.id=?""", (version_id,)).fetchone()
+            if not version:
+                raise ValueError("Version does not exist")
+            if version["document_class"] != "SOURCE":
+                raise ValueError("Verification review applies to original source versions")
+            note = (version["notes"] or "") + f"\nVerification review {utc_now()}: {state} by {reviewer.strip()}"
+            db.execute("UPDATE document_versions SET verification_state=?,notes=? WHERE id=?",
+                       (state,note.strip(),version_id))
 
     def list_documents(self) -> list[dict]:
         with connect(self.db_path) as db:

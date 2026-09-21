@@ -684,17 +684,9 @@ class ResearchOrchestrator:
         self.web_scraper = NoWebDriverScraper(self.api_manager)
         self.db = DatabaseManager()
 
-        # Gmail setup
+        # Legacy Gmail paths are disabled. Slice 4 uses the explicit reviewed
+        # Outreach Review gateway after rotated credentials and reconciliation.
         self.gmail_manager = None
-        if GMAIL_AVAILABLE and GmailManager and os.path.exists(gmail_credentials):
-            try:
-                self.gmail_manager = GmailManager(gmail_credentials)
-                logger.info("Gmail manager initialized successfully")
-            except Exception as e:
-                logger.warning(f"Gmail manager initialization failed: {e}")
-                self.gmail_manager = None
-        else:
-            logger.warning("Gmail credentials not found or GmailManager not available")
 
         self.is_running = False
         self.progress_messages = []
