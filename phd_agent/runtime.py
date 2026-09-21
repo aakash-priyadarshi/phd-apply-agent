@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Mapping
 from urllib.parse import urlsplit
@@ -103,17 +104,20 @@ def _validate_oidc_urls(settings: Settings, environ: Mapping[str, str]) -> None:
         _ = parsed.port
     except ValueError as error:
         raise StartupError("OIDC redirect URI contains an invalid port") from error
-    if (
-        not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.path != "/oauth2callback"
-        or parsed.query
-        or parsed.fragment
-        or (settings.hosted and parsed.scheme != "https")
-        or (not settings.hosted and parsed.scheme not in {"http", "https"})
-    ):
+    if (not parsed.hostname or parsed.username is not None or parsed.password is not None
+            or parsed.path != "/oauth2callback" or parsed.query or parsed.fragment):
+        raise StartupError("OIDC redirect URI must be an absolute /oauth2callback URL")
+    if settings.hosted and parsed.scheme != "https":
         raise StartupError("OIDC redirect URI must be an absolute HTTPS /oauth2callback URL in production")
+    if not settings.hosted and parsed.scheme == "http":
+        try:
+            loopback = ip_address(parsed.hostname).is_loopback
+        except ValueError:
+            loopback = parsed.hostname.casefold() == "localhost"
+        if not loopback:
+            raise StartupError("HTTP OIDC redirect URI must use localhost or a loopback IP")
+    elif not settings.hosted and parsed.scheme != "https":
+        raise StartupError("OIDC redirect URI must use HTTPS or loopback HTTP in development")
     railway_domain = (environ.get("RAILWAY_PUBLIC_DOMAIN") or "").strip().casefold()
     if settings.railway and railway_domain and parsed.hostname.casefold() != railway_domain:
         raise StartupError("OIDC redirect host does not match the Railway public domain")

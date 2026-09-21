@@ -418,6 +418,38 @@ def test_production_oidc_urls_are_strict(tmp_path):
         _prepare(tmp_path, bad_metadata)
 
 
+def test_development_http_oidc_redirect_requires_loopback(tmp_path):
+    data_dir = tmp_path / "data"
+    env = {
+        "PHD_AGENT_ENV": "development",
+        "PHD_AGENT_DATA_DIR": str(data_dir),
+        "PHD_AGENT_ALLOWED_EMAILS": "operator@example.com",
+        "PHD_AGENT_OIDC_CLIENT_ID": "test-client-id",
+        "PHD_AGENT_OIDC_CLIENT_SECRET": "test-client-secret",
+        "PHD_AGENT_OIDC_COOKIE_SECRET": "test-cookie-secret",
+        "PHD_AGENT_OIDC_REDIRECT_URI": "http://development.example/oauth2callback",
+    }
+    with pytest.raises(StartupError, match="localhost or a loopback IP"):
+        prepare_runtime(ROOT, env, secrets_path=tmp_path / "secrets.toml")
+    assert not data_dir.exists()
+
+
+@pytest.mark.parametrize("host", ("localhost", "127.0.0.1", "[::1]"))
+def test_development_http_oidc_redirect_accepts_loopback(tmp_path, host):
+    data_dir = tmp_path / host.replace(":", "_").replace("[", "").replace("]", "")
+    env = {
+        "PHD_AGENT_ENV": "development",
+        "PHD_AGENT_DATA_DIR": str(data_dir),
+        "PHD_AGENT_ALLOWED_EMAILS": "operator@example.com",
+        "PHD_AGENT_OIDC_CLIENT_ID": "test-client-id",
+        "PHD_AGENT_OIDC_CLIENT_SECRET": "test-client-secret",
+        "PHD_AGENT_OIDC_COOKIE_SECRET": "test-cookie-secret",
+        "PHD_AGENT_OIDC_REDIRECT_URI": f"http://{host}:8501/oauth2callback",
+    }
+    settings = prepare_runtime(ROOT, env, secrets_path=data_dir / "secrets.toml")
+    assert settings.data_dir == data_dir.resolve()
+
+
 def test_cms_does_not_render_before_operator_authorization(tmp_path, monkeypatch):
     settings = load_settings(ROOT, _hosted_env(tmp_path))
     rendered = []
