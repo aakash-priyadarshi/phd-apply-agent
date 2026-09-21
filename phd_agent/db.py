@@ -268,6 +268,7 @@ VERSION_METADATA_SCHEMA = (
 from phd_agent.migrations.slice2 import SCHEMA as SLICE_2_SCHEMA, INTEGRITY_TRIGGERS, seed_historical_faculty
 from phd_agent.migrations.slice3 import SCHEMA as SLICE_3_SCHEMA
 from phd_agent.migrations.slice4 import SCHEMA as SLICE_4_SCHEMA
+from phd_agent.migrations.slice5 import SCHEMA as SLICE_5_SCHEMA
 
 
 MIGRATIONS = (
@@ -277,6 +278,7 @@ MIGRATIONS = (
     (4, "slice_2_immutable_review_history", INTEGRITY_TRIGGERS),
     (5, "slice_3_reviewed_materials_and_packages", SLICE_3_SCHEMA),
     (6, "slice_4_reviewed_outreach_and_contact_memory", SLICE_4_SCHEMA),
+    (7, "slice_5_portal_followthrough_and_backup", SLICE_5_SCHEMA),
 )
 
 

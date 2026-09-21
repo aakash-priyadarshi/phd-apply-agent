@@ -64,14 +64,19 @@ def render_today(ledger: Ledger):
         paused = db.execute("SELECT COUNT(*) FROM campaigns WHERE status IN ('PAUSED','STOPPED') OR emergency_stop=1").fetchone()[0]
         replies = db.execute("SELECT COUNT(*) FROM reply_events WHERE detected_state='NEW'").fetchone()[0]
         stale = db.execute("SELECT COUNT(*) FROM outreach_packages WHERE stale_at IS NOT NULL AND status IN ('APPROVED','SCHEDULED')").fetchone()[0]
+        follow_ups = db.execute("SELECT COUNT(*) FROM outreach_packages WHERE status='FOLLOW_UP_DUE'").fetchone()[0]
+        incomplete_portal = db.execute("""SELECT COUNT(*) FROM portal_checklist_fields
+            WHERE required=1 AND status NOT IN ('REVIEWED','EXCLUDED')""").fetchone()[0]
     outreach_labels = [
         ("Outreach review", outreach_counts.get("NEEDS_REVIEW",0)),
         ("Blocked outreach", outreach_counts.get("BLOCKED",0)),
         ("Scheduled", outreach_counts.get("SCHEDULED",0)),
         ("Ambiguous sends", outreach_counts.get("AMBIGUOUS_SEND",0)),
         ("New replies", replies),
+        ("Follow-ups due", follow_ups),
         ("Stale packages", stale),
         ("Paused / stopped campaigns", paused),
+        ("Portal fields to review", incomplete_portal),
     ]
     st.markdown("#### Outreach today")
     for col,(label,count) in zip(st.columns(len(outreach_labels)),outreach_labels):
@@ -607,14 +612,15 @@ def render_cms(db_path: Path):
     from phd_agent.ui_slice2 import render_discovery, render_tracks, render_truth
     from phd_agent.ui_slice3 import render_match_review, render_materials, render_packages
     from phd_agent.ui_slice4 import render_outreach
+    from phd_agent.ui_slice5 import render_followthrough
 
     ledger = Ledger(db_path)
     vault = DocumentVault(db_path)
     st.title("PhD applications")
-    st.caption("Local application ledger, reviewed applicant truth, research matching, materials, packages, and preflight")
-    today, applications, documents, truth, tracks, discovery, matches, materials, packages, outreach = st.tabs([
+    st.caption("Local application ledger, reviewed materials, outreach, reply follow-through, portal answers, and backup")
+    today, applications, documents, truth, tracks, discovery, matches, materials, packages, outreach, followthrough = st.tabs([
         "Today", "Applications", "Document Vault", "Applicant Truth", "Research Directions", "Discovery",
-        "Match Review", "Materials", "Packages & Preflight", "Outreach Review",
+        "Match Review", "Materials", "Packages & Preflight", "Outreach Review", "Follow-through",
     ])
     with today:
         render_today(ledger)
@@ -636,3 +642,5 @@ def render_cms(db_path: Path):
         render_packages(db_path)
     with outreach:
         render_outreach(db_path)
+    with followthrough:
+        render_followthrough(db_path)

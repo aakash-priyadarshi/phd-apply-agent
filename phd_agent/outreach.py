@@ -181,7 +181,7 @@ class OutreachService:
         return f"Dear {name},"
 
     def _contact_reasons(self, faculty_id: int, recipient: str, outreach_key: str,
-                         *, allow_package_id: int | None = None) -> list[str]:
+                         *, allow_package_id: int | None = None, stage: str = "INITIAL") -> list[str]:
         with connect(self.db_path) as db:
             restriction = db.execute("SELECT state FROM contact_restrictions WHERE faculty_profile_id=?", (faculty_id,)).fetchone()
             history_rows = db.execute("""SELECT faculty_profile_id,recipient FROM gmail_threads
@@ -200,7 +200,7 @@ class OutreachService:
         reasons = []
         if restriction and restriction["state"] != "CLEAR":
             reasons.append("CONTACT_RESTRICTION:" + restriction["state"])
-        if history:
+        if history and stage not in {"FOLLOW_UP", "REPLY"}:
             reasons.append("PREVIOUS_GMAIL_CONTACT")
         if sent:
             reasons.append("EXISTING_OUTREACH_MESSAGE:" + sent["status"])
@@ -298,7 +298,7 @@ class OutreachService:
             reasons.append("DOCUMENT_PREFLIGHT_BLOCKED")
         outreach_key = self.key(faculty_id, stage, campaign_id)
         reasons += self._contact_reasons(faculty_id, faculty["email"] or "", outreach_key,
-                                         allow_package_id=allow_package_id)
+                                         allow_package_id=allow_package_id, stage=stage)
         if reasons:
             raise OutreachBlocked(sorted(set(reasons)))
         attachments = []
@@ -323,7 +323,7 @@ class OutreachService:
             tuple(attachments), 0)
 
     @staticmethod
-    def draft_text(context: OutreachContext) -> OutreachEmailDraft:
+    def draft_text(context: OutreachContext, stage: str = "INITIAL") -> OutreachEmailDraft:
         research = terms(context.research_topics + " " + " ".join(context.publication_titles) + " " + context.research_problem)
         best = max(range(len(context.claim_texts)),
                    key=lambda i: len(terms(context.claim_texts[i]) & research))
@@ -334,10 +334,17 @@ class OutreachService:
         labels = {"CV": "CV", "RESEARCH_PROPOSAL": "research proposal", "COVER_LETTER": "cover letter"}
         attached = [labels.get(t, t.lower().replace("_", " ")) for t in attached_types]
         mention = ", ".join(attached[:-1]) + (" and " if len(attached) > 1 else "") + attached[-1]
-        subject = f"PhD research enquiry - {(context.research_topics.split(',')[0].strip() or 'research fit')[:70]}"
+        topic = (context.research_topics.split(",")[0].strip() or "research fit")[:70]
+        if stage == "FOLLOW_UP":
+            subject = f"Follow-up: PhD research enquiry - {topic}"
+            opening = (f"I am following up on my earlier note about PhD research at {context.institution}. "
+                       f"I remain interested in a research conversation and wanted to keep the question in view.")
+        else:
+            subject = f"PhD research enquiry - {topic}"
+            opening = (f"I am preparing a PhD application at {context.institution} and am writing to ask about the best route "
+                       f"for a research conversation.")
         body = (f"{OutreachService.greeting(context)}\n\n"
-                f"I am preparing a PhD application at {context.institution} and am writing to ask about the best route "
-                f"for a research conversation. {observation}\n\n"
+                f"{opening} {observation}\n\n"
                 f"{context.claim_texts[best]} My proposed research direction asks: {context.research_problem} "
                 f"I see a possible connection to your group's work and would value your view on whether this question "
                 f"fits its current research. I am particularly interested in evaluations that reveal when these systems fail.\n\n"
@@ -348,7 +355,8 @@ class OutreachService:
             context.publication_ids[:1], context.research_track_version_id, context.requirement_ids,
             tuple(a.document_version_id for a in context.attachments), tuple(attached), (), utc_now())
 
-    def quality_gate(self, context: OutreachContext, draft: OutreachEmailDraft) -> dict:
+    def quality_gate(self, context: OutreachContext, draft: OutreachEmailDraft, *,
+                     stage: str = "INITIAL") -> dict:
         rules = []
         def add(rule_id, severity, message, affected=None, remediation=""):
             rules.append({"rule_id": rule_id, "status": severity, "message": message,
@@ -462,7 +470,8 @@ class OutreachService:
         add("SUBJECT", "PASS" if subject_ok else "BLOCK", "Concise safe subject" if subject_ok else "Subject missing, too long, or multiline",
             None, "Use a single-line subject under 120 characters")
         contact = self._contact_reasons(context.professor_id, context.recipient,
-                                        self.key(context.professor_id), allow_package_id=None)
+                                        self.key(context.professor_id, stage),
+                                        allow_package_id=None, stage=stage)
         # Package/queue duplication is checked before generation and again before send.
         contact = [r for r in contact if not r.startswith("DUPLICATE_ACTIVE_OUTREACH")]
         add("CONTACT_MEMORY", "BLOCK" if contact else "PASS", ", ".join(contact) if contact else "No known contact restriction or previous message",
@@ -475,12 +484,12 @@ class OutreachService:
                 stage: str = "INITIAL") -> int:
         context = self.build_context(faculty_id, application_id, document_package_id,
                                      profile_version_id, track_version_id, campaign_id=campaign_id, stage=stage)
-        draft = self.draft_text(context)
+        draft = self.draft_text(context, stage=stage)
         return self._store(context, draft, campaign_id=campaign_id, stage=stage)
 
     def _store(self, context: OutreachContext, draft: OutreachEmailDraft, *,
                campaign_id: int | None, stage: str) -> int:
-        gate = self.quality_gate(context, draft)
+        gate = self.quality_gate(context, draft, stage=stage)
         snapshot = {"context": asdict(context), "draft": asdict(draft)}
         content = _dump(snapshot)
         digest = hashlib.sha256(content.encode()).hexdigest()
@@ -579,7 +588,7 @@ class OutreachService:
             campaign_id=package["campaign_id"], stage=package["stage"], allow_package_id=package_id)
         if hashlib.sha256(package["snapshot_json"].encode()).hexdigest() != package["snapshot_sha256"]:
             raise ValueError("Outreach snapshot hash changed")
-        gate = self.quality_gate(context, draft)
+        gate = self.quality_gate(context, draft, stage=package["stage"])
         if gate["status"] == "BLOCK":
             raise OutreachBlocked([r["rule_id"] for r in gate["rules"] if r["status"] == "BLOCK"])
         with transaction(self.db_path) as db:
@@ -634,7 +643,7 @@ class OutreachService:
                 campaign_id=package["campaign_id"], stage=package["stage"], allow_package_id=package_id)
         except OutreachBlocked as error:
             reasons.extend(error.reasons)
-        gate = self.quality_gate(context, draft)
+        gate = self.quality_gate(context, draft, stage=package["stage"])
         reasons += [r["rule_id"] for r in gate["rules"] if r["status"] == "BLOCK"]
         if reasons and not package["stale_at"]:
             with transaction(self.db_path) as db:
@@ -757,7 +766,7 @@ class OutreachService:
         self.build_context(context.professor_id, context.application_id, context.document_package_id,
             context.profile_version_id, context.research_track_version_id,
             campaign_id=package["campaign_id"], stage=package["stage"], allow_package_id=package_id)
-        gate = self.quality_gate(context, draft)
+        gate = self.quality_gate(context, draft, stage=package["stage"])
         if gate["status"] == "BLOCK":
             raise OutreachBlocked([r["rule_id"] for r in gate["rules"] if r["status"] == "BLOCK"])
         if hashlib.sha256(package["snapshot_json"].encode()).hexdigest() != package["snapshot_sha256"]:

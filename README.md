@@ -103,6 +103,18 @@ Campaigns provide review-mode policies, pause/emergency controls, and saved dry 
 
 Legacy bulk send, generate-and-send, and individual send controls remain disabled. No portal application is submitted by this slice.
 
+## Follow-through (Slice 5)
+
+**Application CMS → Follow-through** classifies imported reply metadata, creates the next document/meeting/portal task, and can draft a reviewed follow-up. Classification never sends a reply. A proposal request can generate a draft variant from the approved research direction; that draft still needs review before it can enter a package.
+
+Portal answers are an approved copy-ready library with visible sources. Map them onto a per-application field checklist, review each value, then paste into the institution form yourself. After you submit and pay on the university site, freeze a **submission archive** with the confirmation number, user-recorded payment state, frozen package hashes, and the reviewed answers. The app does not submit the portal form and does not process payment.
+
+**Backup** copies the SQLite ledger and Document Vault into a new directory and verifies hashes on restore. `credentials.json` and `gmail_token.json` are excluded unless you explicitly include them. Restore into a separate directory first; replacing an existing database requires an explicit flag. Stop the app before restoring over the active database.
+
+The isolated demonstration runs with `.\.venv\Scripts\python.exe -m scripts.slice5_demo --output-dir data/slice5-demo-fresh` (choose a fresh ignored directory). It does not contact Gmail or a university portal.
+
+OAuth client rotation remains mandatory before any real Gmail use.
+
 ## Current workflow
 
 1. Upload or reuse a local CV, then generate the research profile.
