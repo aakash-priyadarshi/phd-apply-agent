@@ -112,6 +112,15 @@ def render_truth(db_path: Path):
         claim = next(c for c in claims if c["id"] == chosen)
         st.write(claim["claim_text"])
         st.caption(f"Source location: {claim['source_location'] or 'unknown'} · {claim['notes']}")
+        if claim["source_evidence_id"]:
+            evidence = next((r for r in Ledger(db_path).list_evidence() if r["id"] == claim["source_evidence_id"]), None)
+            if evidence:
+                st.write({"Source URL": evidence["canonical_url"], "Review": evidence["verification_state"],
+                          "Excerpt": evidence["relevant_excerpt"]})
+        if claim["source_document_version_id"]:
+            version = vault.get_version(claim["source_document_version_id"])
+            if version:
+                st.caption(f"Vault source #{version['id']} · {version['approval_state']} · SHA-256 {version['sha256']}")
         if claim["review_status"] == "PENDING":
             with st.form("claim_review"):
                 edited = st.text_area("Edit wording before review", value=claim["claim_text"])
@@ -196,6 +205,14 @@ def render_tracks(db_path: Path):
         st.warning(f"Supporting claims no longer approved: {unsupported}")
     if not json.loads(latest["supporting_claim_revision_ids_json"]):
         st.info("No approved applicant claims support experience related to this direction yet.")
+    else:
+        st.write("Approved supporting statements")
+        st.dataframe([{"Claim revision": i, "Statement": claim_labels.get(i, "UNAPPROVED")}
+                      for i in json.loads(latest["supporting_claim_revision_ids_json"])], hide_index=True)
+    unsupported_fields = [field for field in ("related_projects", "prior_work")
+                          if latest[field] and not json.loads(latest["supporting_claim_revision_ids_json"])]
+    if unsupported_fields:
+        st.warning("These experience statements have no approved supporting claims: " + ", ".join(unsupported_fields))
     with st.form(f"edit_track_{track_id}"):
         new_title = st.text_input("Edit title", value=track["title"])
         new_priority = st.slider("Edit priority", 1, 5, track["priority"])
@@ -214,6 +231,9 @@ def render_tracks(db_path: Path):
         reviewer = st.text_input("Track reviewer", key=f"track_reviewer_{track_id}")
         if st.button("Approve latest version", key=f"track_approve_{track_id}"):
             _act(lambda: truth.approve_track(latest["id"], reviewer), "Research direction approved")
+    elif latest["approval_state"] == "APPROVED":
+        if st.button("Return to draft as a new version", key=f"track_redraft_{track_id}"):
+            _act(lambda: truth.return_track_to_draft(track_id), "New editable research direction version created")
 
 
 def render_discovery(db_path: Path):

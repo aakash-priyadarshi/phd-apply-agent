@@ -922,6 +922,9 @@ class ResearchOrchestrator:
     def send_bulk_emails_sync(self, user_name: str, cv_path: str = str(SETTINGS.cv_path), delay_seconds: int = 10) -> Dict[str, Any]:
             """Send all drafted emails with Gmail API."""
 
+            # Slice 4 must provide a reviewed queue and contact-history gate.
+            return {"success": False, "error": "Bulk sending is disabled until the reviewed queue is implemented"}
+
             if not SETTINGS.auto_send_enabled:
                 return {"success": False, "error": "Bulk sending is disabled until the reviewed queue is implemented"}
             
@@ -1033,6 +1036,7 @@ class ResearchOrchestrator:
 
     def generate_and_send_all_sync(self, user_research_profile: str, user_name: str, cv_path: str = str(SETTINGS.cv_path), delay_seconds: int = 10) -> Dict[str, Any]:
         """Generate and send in one step (disabled until reviewed queue exists)."""
+        return {"success": False, "error": "Generate-and-send is disabled until the reviewed queue is implemented"}
         if not SETTINGS.auto_send_enabled:
             return {"success": False, "error": "Generate-and-send is disabled until the reviewed queue is implemented"}
         self.add_progress_message("🚀 Starting generate and send all process...")
@@ -1122,64 +1126,9 @@ class ResearchOrchestrator:
             return False
 
     def send_single_email_sync(self, professor_id: int, user_name: str, cv_path: str = str(SETTINGS.cv_path)) -> bool:
-        """Send email for a single professor."""
-        
-        if not self.gmail_manager:
-            self.add_progress_message("❌ Gmail not configured")
-            return False
-
-        try:
-            conn = sqlite3.connect(self.db.db_path)
-            cursor = conn.cursor()
-            cursor.execute('SELECT * FROM professors WHERE id = ?', (professor_id,))
-            
-            columns = [description[0] for description in cursor.description]
-            row = cursor.fetchone()
-            conn.close()
-
-            if not row:
-                self.add_progress_message("❌ Professor not found")
-                return False
-
-            professor_data = dict(zip(columns, row))
-            
-            if professor_data['status'] != 'email_drafted':
-                self.add_progress_message("❌ Email not drafted for this professor")
-                return False
-
-            if not professor_data['email']:
-                self.add_progress_message("❌ No email address for this professor")
-                return False
-
-            send_result = self.gmail_manager.send_email(
-                to_email=professor_data['email'],
-                subject=professor_data['draft_email_subject'],
-                body=professor_data['draft_email_body'],
-                from_name=user_name,
-                cv_path=cv_path if cv_path and os.path.exists(cv_path) else ""
-            )
-
-            if send_result["success"]:
-                conn = sqlite3.connect(self.db.db_path)
-                cursor = conn.cursor()
-                cursor.execute('''
-                    UPDATE professors 
-                    SET status = 'email_sent', email_sent_at = ?
-                    WHERE id = ?
-                ''', (send_result['sent_at'], professor_id))
-                conn.commit()
-                conn.close()
-
-                self.add_progress_message(f"✅ Email sent to {professor_data['name']} ({professor_data['email']})")
-                return True
-            else:
-                self.add_progress_message(f"❌ Failed to send email to {professor_data['name']}: {send_result.get('error')}")
-                return False
-
-        except Exception as e:
-            logger.error(f"Error sending email for professor {professor_id}: {e}")
-            self.add_progress_message(f"❌ Error sending email: {e}")
-            return False
+        # Slice 4 must implement contact history and outreach preflight first.
+        self.add_progress_message("Email sending is disabled until reviewed outreach packages are implemented")
+        return False
 
     def stop_research(self):
         """Stop the research pipeline."""
@@ -1307,7 +1256,8 @@ def show_email_edit_modal(professor_data):
                 st.error(f"❌ Failed to save changes: {e}")
     
     with col2:
-        if st.button("📤 Save & Send", key=f"modal_send_{professor_data['id']}"):
+        if st.button("📤 Save & Send", key=f"modal_send_{professor_data['id']}", disabled=True,
+                     help="Outreach preflight is planned for Slice 4"):
             try:
                 # Convert line breaks back to escaped format for storage
                 saved_body = (edited_body or "").replace('\n\n', '\\n\\n').replace('\n', '\\n')
@@ -2126,7 +2076,8 @@ def main():
                                         show_email_preview(prof)
 
                                     # Send individual email
-                                    if st.button("📤 Send Email", key=f"send_{prof['id']}", type="primary"):
+                                    if st.button("📤 Send Email", key=f"send_{prof['id']}", type="primary", disabled=True,
+                                                 help="Outreach preflight is planned for Slice 4"):
                                         if st.session_state.orchestrator.gmail_manager and st.session_state.get('user_name'):
                                             with st.spinner("Sending email..."):
                                                 try:

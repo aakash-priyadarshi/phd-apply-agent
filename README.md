@@ -61,7 +61,27 @@ The **Discovery** tab manages target institution states, official source URLs, e
 
 Search or enter an official programme, faculty, lab, or vacancy page; snapshot it; then review any candidate before adding a faculty profile or opportunity. `OPEN`, `CLOSED`, and `UNKNOWN` opportunity states are separate from publication activity. OpenAlex author search is available after institutional identity review; an operator must choose the author after comparing name, affiliation, subject area, and works. Independent publication pages can be linked when OpenAlex affiliation metadata is noisy. A paper never establishes a current opening. Discoveries can link to the application ledger, and conflicting programme, opportunity, deadline, or requirement data creates a review task instead of overwriting entered values. Research Fit and Application Readiness remain separate nullable fields with explicit unknowns.
 
-The ten-record pilot is reproducible with `python -m scripts.slice2_pilot --apply` after reviewing the linked official pages. The command is idempotent for records already reviewed. It creates draft research directions and one Stanford programme application opportunity, but no application, email, or submission. The remaining historical professor records require controlled review. This slice does not generate tailored CVs, SOPs, proposals, emails, or portal submissions.
+The ten-record pilot is reproducible with `python -m scripts.slice2_pilot --apply` after reviewing the linked official pages. The command is idempotent for records already reviewed. It creates draft research directions and one Stanford programme application opportunity, but no application, email, or submission. The remaining historical professor records require controlled review.
+
+## Reviewed matching, materials, and packages
+
+Slice 3 adds **Match Review**, **Materials**, and **Packages / Preflight** to Application CMS. Start in **Applicant Truth**: review source evidence for each claim, choose its application and outreach permissions, and create an approved profile snapshot. In **Research Directions**, review supporting claim IDs and approve a track version. The existing nine pending claims and three draft directions are not automatically approved. Returning an approved direction to draft creates a new version.
+
+Match Review computes a 0–10 Research Fit from five configurable, evidence-backed components and displays evidence coverage and unknown components. Application Readiness is a separate set of factual states, never an admission probability. Overrides and annotations create append-only review versions. A publication is research evidence, not evidence of an opening. Before faculty contact, record an explicit official policy such as `ALLOWED`, `CONTACT_ALLOWED`, or `DO_NOT_CONTACT`; unrecognized free text stays unknown.
+
+Materials supports approved, versioned Master CV sections and story modules. Each reusable bullet/module names approved claim revision IDs. Tailored CVs select or reorder reviewed sections and show the master-to-variant diff. Statements use approved story modules plus an exact sourced requirement. Proposals preserve an approved research direction and cite only stored, verified publications. A cover letter needs a required/optional sourced requirement or an intentional manual selection. Drafts keep editable text, PDF, generation context, claim/evidence IDs, model/template identifiers, and quality checks. Review each PDF and its evidence before approval; a new edit creates a new version. The local renderer and manual workflows work without an OpenAI key. Short content is visibly warned and needs human expansion/review for a competitive application.
+
+Packages use a deterministic rule for each requirement: `INCLUDE`, `EXCLUDE`, or `REVIEW`. `UNKNOWN` is always `REVIEW`. A required document must be linked to an approved Vault version before a package can be built. The builder freezes requirement/evidence snapshots, selected version IDs, SHA-256 hashes, decisions, and a manifest under `data/exports/<application>/package-vN/`. It can create a ZIP and an explicitly selected combined PDF while preserving the originals. The export is a convenience copy; the Vault remains canonical.
+
+Run preflight before marking a package ready. It checks the context, current requirements and evidence, files and hashes, limits, generated material lineage, citations, and relevant application or faculty conditions. Every rule has `PASS`, `WARNING`, or `BLOCK`, an affected record, and an operator action. A `BLOCK` prevents `READY`; `WARNING` remains visible for reviewer judgment. Formal packages also require the application deadline, route, eligibility, and referees. Outreach packages require current faculty affiliation, research evidence, verified email, and an explicitly allowed contact policy. **READY means reviewed materials only**: Slice 3 sends no email, submits no portal form, and stores no cloud documents. The legacy single-send controls are disabled until the later outreach safety workflow exists.
+
+The isolated demonstration can be reproduced from the approved local Slice 2 database with:
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.slice3_demo --source-db data/phd_outreach.db --output-dir data/slice3-demo-new --liverpool-results "C:\Users\aakas\OneDrive\Desktop\PHD documents\Aakash-Priyadarshi-liverpool-marksheet.pdf"
+```
+
+Choose a fresh output directory each run. The script copies the database and Vault into that ignored directory, then makes sandbox-only review decisions for the Stanford programme and Diyi Yang research scenario. It writes `demo-report.json` and a local package export. It never approves claims or adds applications to the active database. The Liverpool assessment-results PDF is marked `PROVISIONAL_TRANSCRIPT`; a missing Galgotias transcript is replaced only in the sandbox with a prominent `DEMO_ONLY` placeholder. Both force preflight `BLOCK` until genuine accepted transcripts are supplied. The demo also leaves eligibility, English applicability, referee submissions, and the fee unresolved. Review and replace these in the real CMS; do not submit the sandbox package.
 
 The original root copies of the 2025 runtime files were removed from the working tree after verified local copies were made. Git still contains their earlier versions in history. This branch does **not** rewrite Git history.
 
@@ -71,7 +91,7 @@ The old OAuth client file was tracked in the public repository and has been pres
 
 The app never loads the old `gmail_token.pickle`. Gmail authorization creates `data/gmail_token.json`; treat it as a credential. The JSON token is not encrypted by this local release, so keep the data directory accessible only to your user account and protect the disk. If an old pickle token exists, remove it after you have confirmed the new authorization works. The app currently requests Gmail send and read access; read access supports connection status and the planned sent-history reconciliation.
 
-Bulk send and generate-and-send controls are disabled in this release. Individual professor emails still require a deliberate click in the Streamlit UI. The reviewed outreach queue, factuality gate, and Gmail history protection are later slices.
+Bulk send, generate-and-send, and individual send controls are disabled in this release. The reviewed outreach queue, factuality gate, and Gmail history protection are later slices.
 
 ## Current workflow
 
@@ -79,6 +99,6 @@ Bulk send and generate-and-send controls are disabled in this release. Individua
 2. Add target universities or reuse the copied target list.
 3. Run Stage 1 discovery and inspect the results.
 4. Generate and edit an email for one professor.
-5. Send that individual email only after reviewing it and the CV attachment.
+5. Review the draft locally; sending is disabled until the later outreach workflow is approved.
 
 The 2025 discovery map is limited, and existing professor records need reverification for the new cycle. Do not treat an old `verified` status as current recruiting evidence.

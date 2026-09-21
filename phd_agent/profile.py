@@ -428,6 +428,10 @@ class ApplicantTruth:
             db.execute("""UPDATE research_track_versions SET approval_state='APPROVED',
                 approved_at=?,approved_by=? WHERE id=?""", (utc_now(), reviewer.strip(), version_id))
 
+    def return_track_to_draft(self, track_id: int) -> int:
+        """Preserve the reviewed version and open a new editable draft."""
+        return self.revise_track(track_id)
+
     def update_track(self, track_id: int, *, title: str | None = None,
                      priority: int | None = None, archive: bool | None = None) -> None:
         with transaction(self.db_path) as db:

@@ -196,6 +196,13 @@ class Ledger:
     def update_application(self, application_id: int, **changes) -> None:
         if "status" in changes and changes["status"] not in APPLICATION_STATUSES:
             raise ValueError("Invalid application status")
+        if changes.get("status") == "READY_TO_SUBMIT":
+            with connect(self.db_path) as db:
+                ready = db.execute("""SELECT 1 FROM application_packages WHERE application_id=?
+                    AND context='FORMAL_APPLICATION' AND status='READY' ORDER BY version_number DESC LIMIT 1""",
+                    (application_id,)).fetchone()
+            if not ready:
+                raise ValueError("A formal application package must pass preflight and be marked READY first")
         self._update("applications", application_id, changes, {
             "cycle", "status", "portal_url", "funding_state", "eligibility_state",
             "supervisor_contact_state", "next_action", "owner_notes",

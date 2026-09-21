@@ -23,6 +23,15 @@ FRESHNESS_DAYS: Mapping[str, int] = {
     "PUBLICATION": 30,
 }
 
+MATCH_WEIGHTS: Mapping[str, float] = {
+    "topic": 0.30,
+    "method": 0.20,
+    "recent_work": 0.20,
+    "experience": 0.20,
+    "proposed_direction": 0.10,
+}
+
+
 
 @dataclass(frozen=True)
 class Settings:
