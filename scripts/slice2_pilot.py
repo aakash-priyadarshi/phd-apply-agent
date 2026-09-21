@@ -109,7 +109,9 @@ def main() -> None:
             institution, "FACULTY", url, target_id=targets.get(institution),
             department=department, strategy="STATIC_HTML", notes="Slice 2 ten-record manual pilot")
         try:
-            evidence_id = discovery.snapshot_source(source_id, manually_verified=True)
+            excerpt = name.removeprefix("Dr. ").removeprefix("Dr ")
+            evidence_id = discovery.snapshot_source(
+                source_id, excerpt=excerpt, manually_verified=True)
         except Exception as error:
             if legacy_id != 37:
                 print("Source fetch failed", legacy_id, str(error)[:160])
@@ -231,7 +233,13 @@ def main() -> None:
         source_id = discovery.add_source("Stanford University", "PROGRAMME", programme_url,
             target_id=targets.get("Stanford University"), department="Computer Science",
             strategy="STATIC_HTML", notes="2026 application window and deadline")
-        evidence_id = discovery.snapshot_source(source_id, manually_verified=True)
+        try:
+            evidence_id = discovery.snapshot_source(
+                source_id, excerpt="December 8, 2026", manually_verified=True)
+        except Exception as error:
+            print("Programme source not verified from reviewed excerpt;",
+                  "deadline remains unresolved:", str(error)[:160])
+            return
         discovery.add_opportunity("PROGRAMME_APPLICATION", "Stanford CS PhD Autumn 2027",
             "Stanford University", evidence_id, opening_status="OPEN", programme_id=programme_id,
             department_lab="Computer Science", deadline_at="2026-12-08",

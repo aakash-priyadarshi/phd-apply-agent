@@ -42,7 +42,7 @@ from dotenv import load_dotenv
 
 from phd_agent.config import load_settings
 from phd_agent.paths import ensure_data_layout
-from phd_agent.security import tracked_private_paths
+from phd_agent.security import GitInspectionFailed, tracked_private_paths
 from phd_agent.ui import render_cms
 
 # Import Gmail manager
@@ -1319,9 +1319,13 @@ def main():
         initial_sidebar_state="expanded"
     )
 
-    tracked = tracked_private_paths()
-    if tracked:
-        st.warning("Private runtime files are still tracked by Git: " + ", ".join(tracked))
+    try:
+        tracked = tracked_private_paths()
+    except GitInspectionFailed:
+        st.warning("Git could not be inspected for tracked private files.")
+    else:
+        if tracked:
+            st.warning("Private runtime files are still tracked by Git: " + ", ".join(tracked))
 
     workspace = st.sidebar.radio("Workspace", ["Application CMS", "Legacy outreach"])
     if workspace == "Application CMS":

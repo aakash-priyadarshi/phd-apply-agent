@@ -139,7 +139,10 @@ class MatchEngine:
             "programme_or_opening": state(bool(programme or opportunity), bool(app)),
             "application_route": state(bool(route), bool(route)),
             "deadline": state(bool(main_deadline and main_deadline["due_at"][:10] >= date.today().isoformat() and main_deadline["verification_state"] == "VERIFIED"), bool(main_deadline), [main_deadline["source_evidence_id"]] if main_deadline else []),
-            "eligibility": state(bool(app and app["eligibility_state"] == "ELIGIBLE"), bool(app and app["eligibility_state"] not in {"UNKNOWN", "NEEDS_REVIEW"})),
+            "eligibility": state(
+                bool(app and app["eligibility_state"] == "ELIGIBLE"),
+                bool(app and app["eligibility_state"] and app["eligibility_state"] not in {"UNKNOWN", "NEEDS_REVIEW"}),
+            ),
             "contact_policy": {"state": contact_policy_state(opportunity["contact_policy"] if opportunity else None),
                                "evidence_ids": [opportunity["source_evidence_id"]] if opportunity and opportunity["source_evidence_id"] else []},
             "supervisor_opening": state(bool(opportunity and opportunity["opportunity_type"] == "ADVERTISED_POSITION" and opportunity["opening_status"] == "OPEN"), bool(opportunity and opportunity["opportunity_type"] == "ADVERTISED_POSITION" and opportunity["opening_status"] != "UNKNOWN"), [opportunity["source_evidence_id"]] if opportunity and opportunity["source_evidence_id"] else []),

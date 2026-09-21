@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from phd_agent.db import connect
+from phd_agent.db import connect, transaction
 from phd_agent.discovery import Discovery, canonical_url, freshness
 from phd_agent.ledger import Ledger
 from phd_agent.openalex import OpenAlexEnrichment
@@ -163,10 +163,13 @@ def test_openalex_author_review_ambiguity_and_publications(discovery):
             "publication_date": "2025-06-01", "publication_year": 2025,
             "authorships": [{"author": {"id": "https://openalex.org/A123", "display_name": "Ada Example"}}],
             "topics": [{"display_name": "Robotics"}], "primary_location": {"source": {"display_name": "Journal"}}}
+    malformed = {"title": "Missing identifier"}
+    bad_author = {**work, "id": "https://openalex.org/W000",
+                  "authorships": [{"author": {"id": "not-an-openalex-id"}}]}
     session = Session({
         "https://api.openalex.org/authors": Response({"results": [author, other]}),
         "https://api.openalex.org/authors/A123": Response(author),
-        "https://api.openalex.org/works": Response({"results": [work]}),
+        "https://api.openalex.org/works": Response({"results": [malformed, bad_author, work]}),
         "https://example.edu/publications": Response(text="<main>Ada Example wrote Robot evaluation in Journal.</main>"),
     })
     enrichment = OpenAlexEnrichment(discovery.db_path, session=session)
@@ -195,3 +198,13 @@ def test_openalex_author_review_ambiguity_and_publications(discovery):
     relevance = discovery.publication_relevance(publication["id"], profile)
     assert relevance[0]["topic_overlap"] == ["evaluation", "robot"]
     assert relevance[0]["track_state"] == "DRAFT"
+
+
+def test_invalid_stored_profile_urls_are_ignored_for_duplicates(discovery):
+    first = discovery.create_faculty("Ada Example", "Example University")
+    second = discovery.create_faculty("Bea Example", "Example University")
+    with transaction(discovery.db_path) as db:
+        db.execute("UPDATE faculty_profiles SET official_profile_url='not a url' WHERE id IN (?,?)",
+                   (first, second))
+    assert discovery.duplicate_signals("Other Person", "Elsewhere", "https://example.edu/ada") == []
+    assert discovery.scan_historical_duplicates() == 0

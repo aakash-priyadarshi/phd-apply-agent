@@ -273,7 +273,9 @@ def test_mock_gmail_gateway_metadata_and_exact_mime_attachment():
         def __init__(self): self.raw=None
         def users(self): return self
         def messages(self): return self
-        def list(self,**_): return Request({"messages":[{"id":"m1"}]})
+        def list(self,**kwargs):
+            self.last_q=kwargs.get("q")
+            return Request({"messages":[{"id":"m1"}]})
         def get(self,**_): return Request({"id":"m1","threadId":"t1","internalDate":"1789980000000",
             "payload":{"headers":[{"name":"To","value":"Dr One <one@example.edu>"},
                                   {"name":"Subject","value":"Research enquiry"}]}})
@@ -283,6 +285,9 @@ def test_mock_gmail_gateway_metadata_and_exact_mime_attachment():
     fake=FakeService()
     gateway=GmailGateway(service=fake)
     records=gateway.list_sent()
+    assert fake.last_q=="in:sent"
+    later=gateway.list_sent(after=datetime(2026,9,21,tzinfo=timezone.utc))
+    assert "after:" in fake.last_q
     assert records[0]["recipient"]=="Dr One <one@example.edu>"
     assert records[0]["message_id"]=="m1" and records[0]["thread_id"]=="t1"
     result=gateway.send("one@example.edu","Research enquiry","Reviewed body",[("cv.pdf",b"exact bytes")],"snapshot-hash")
@@ -316,3 +321,20 @@ def test_live_gateway_rechecks_sent_history_immediately_before_send(case):
     with connect(c["path"]) as db:
         assert db.execute("SELECT COUNT(*) FROM outreach_messages").fetchone()[0]==0
         assert db.execute("SELECT COUNT(*) FROM gmail_threads WHERE gmail_message_id='external-1'").fetchone()[0]==1
+
+
+def test_unresolved_sent_recipient_is_stored_without_aborting(case):
+    outreach = case["outreach"]
+    result = outreach.reconcile_sent([
+        {"recipient": "undisclosed-recipients:;", "subject": "Hidden", "message_at": utc_now(),
+         "message_id": "gid-unresolved", "thread_id": "tid-unresolved"},
+        {"recipient": "ada.one@example.edu", "subject": "Known", "message_at": utc_now(),
+         "message_id": "gid-known", "thread_id": "tid-known"},
+    ], source="TEST")
+    assert result["scanned"] == 2 and result["exact_email_candidates"] == 1
+    with connect(case["path"]) as db:
+        unresolved = db.execute("SELECT * FROM gmail_threads WHERE gmail_message_id='gid-unresolved'").fetchone()
+        known = db.execute("SELECT * FROM gmail_threads WHERE gmail_message_id='gid-known'").fetchone()
+    assert unresolved["faculty_profile_id"] is None
+    assert unresolved["match_state"] == "PENDING" and unresolved["match_confidence"] == "UNKNOWN"
+    assert known["faculty_profile_id"] == case["faculty"]

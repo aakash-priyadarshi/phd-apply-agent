@@ -77,13 +77,8 @@ class GmailManager:
                     creds = flow.run_local_server(port=0)
                 
                 # Save credentials for next run without leaving a partial token file.
-                token_path = Path(self.token_file)
-                token_path.parent.mkdir(parents=True, exist_ok=True)
-                temporary = token_path.with_suffix(".json.tmp")
-                temporary.write_text(creds.to_json(), encoding="utf-8")
-                os.replace(temporary, token_path)
-                if os.name != "nt":
-                    token_path.chmod(0o600)
+                from phd_agent.security import write_restricted_file
+                write_restricted_file(Path(self.token_file), creds.to_json())
             
             # Build the service with credentials
             self.service = build('gmail', 'v1', credentials=creds, cache_discovery=False)

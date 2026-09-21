@@ -78,13 +78,18 @@ class GmailGateway:
             raise RuntimeError("Gmail response lacked a message or thread ID; reconcile Sent before retrying")
         return {"message_id": result["id"], "thread_id": result["threadId"]}
 
-    def list_sent(self) -> list[dict]:
-        """Read the complete Sent history before permitting reviewed outreach."""
+    def list_sent(self, after: datetime | None = None) -> list[dict]:
+        """Read Sent history. A checkpoint limits later scans to newer messages."""
         service = self.service
         found = []
         page_token = None
+        query = "in:sent"
+        if after is not None:
+            if after.tzinfo is None:
+                after = after.replace(tzinfo=timezone.utc)
+            query += f" after:{int(after.timestamp())}"
         while True:
-            response = service.users().messages().list(userId="me", q="in:sent",
+            response = service.users().messages().list(userId="me", q=query,
                 maxResults=100, pageToken=page_token).execute()
             for item in response.get("messages", []):
                 full = service.users().messages().get(userId="me", id=item["id"], format="metadata",

@@ -149,9 +149,17 @@ class OpenAlexEnrichment:
                                     "sort": "publication_date:desc", "per_page": max_works})
         inserted = 0
         for work in data.get("results", []):
-            work_id = _short_id(work["id"], "W")
-            if not any(_short_id((entry.get("author") or {}).get("id", ""), "A") == author_id
-                       for entry in work.get("authorships", []) if (entry.get("author") or {}).get("id")):
+            try:
+                work_id = _short_id(work.get("id") or "", "W")
+            except (TypeError, ValueError):
+                continue
+            author_ids = []
+            for entry in work.get("authorships") or []:
+                try:
+                    author_ids.append(_short_id(((entry.get("author") or {}).get("id") or ""), "A"))
+                except (TypeError, ValueError):
+                    continue
+            if author_id not in author_ids:
                 continue
             title = (work.get("title") or work.get("display_name") or "").strip()
             if not title:

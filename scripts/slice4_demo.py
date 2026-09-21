@@ -139,7 +139,9 @@ def run(output_dir: Path, source_db: Path | None = None) -> dict:
 if __name__ == "__main__":
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir",type=Path,default=Path("data/slice4-demo"))
-    parser.add_argument("--source-db",type=Path,default=Path("data/phd_outreach.db"))
+    parser.add_argument("--source-db",type=Path,default=None)
     args=parser.parse_args()
+    if args.source_db is not None and not args.source_db.is_file():
+        raise SystemExit("--source-db must point to an existing database file")
     result=run(args.output_dir,args.source_db)
     print(json.dumps(result,indent=2))

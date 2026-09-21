@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import io
 import json
 import re
@@ -26,9 +27,12 @@ def _dump(value) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _pdf_markup(value: str) -> str:
+    return html.escape(value, quote=True)
+
+
 def render_pdf(title: str, text: str) -> bytes:
     """Conservative paginated PDF; source remains editable in the database."""
-    from xml.sax.saxutils import escape
     output = io.BytesIO()
     styles = getSampleStyleSheet()
     styles["Normal"].fontName = "Helvetica"
@@ -36,7 +40,7 @@ def render_pdf(title: str, text: str) -> bytes:
     styles["Normal"].leading = 14
     doc = SimpleDocTemplate(output, pagesize=(595.28, 841.89), leftMargin=58,
                             rightMargin=58, topMargin=56, bottomMargin=56)
-    story = [Paragraph(escape(title), styles["Title"]), Spacer(1, 10)]
+    story = [Paragraph(_pdf_markup(title), styles["Title"]), Spacer(1, 10)]
     for paragraph in text.split("\n\n"):
         paragraph = paragraph.strip()
         if not paragraph:
@@ -46,9 +50,9 @@ def render_pdf(title: str, text: str) -> bytes:
             if not line:
                 continue
             if line.startswith("# "):
-                story.append(Paragraph(escape(line[2:]), styles["Heading2"]))
+                story.append(Paragraph(_pdf_markup(line[2:]), styles["Heading2"]))
             else:
-                story.append(Paragraph(escape(line), styles["Normal"]))
+                story.append(Paragraph(_pdf_markup(line), styles["Normal"]))
                 story.append(Spacer(1, 3))
         story.append(Spacer(1, 8))
     def page_number(canvas, document):

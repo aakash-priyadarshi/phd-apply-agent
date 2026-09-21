@@ -123,3 +123,14 @@ def test_track_versioning_and_approved_immutability(truth):
     assert truth.track_history(track_id)[0]["approval_state"] == "DRAFT"
     truth.update_track(track_id, priority=1, archive=True)
     assert truth.list_tracks(profile)[0]["status"] == "ARCHIVED"
+
+
+def test_overlapping_chunks_cover_boundaries_and_short_pages():
+    from phd_agent.profile import _overlapping_chunks
+    assert _overlapping_chunks("") == []
+    assert _overlapping_chunks("short") == ["short"]
+    text = "a" * 15000
+    chunks = _overlapping_chunks(text, size=10000, overlap=1000)
+    assert chunks[0] == text[:10000]
+    assert chunks[1] == text[9000:15000]
+    assert chunks[0][-1000:] == chunks[1][:1000]

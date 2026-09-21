@@ -42,6 +42,15 @@ def canonical_url(url: str) -> str:
     return urlunparse((parts.scheme.lower(), parts.netloc.lower(), parts.path or "/", "", parts.query, ""))
 
 
+def _safe_canonical_url(url: str | None) -> str | None:
+    if not url or not str(url).strip():
+        return None
+    try:
+        return canonical_url(url)
+    except ValueError:
+        return None
+
+
 def freshness(retrieved_at: str | None, fact_kind: str, *, now: datetime | None = None) -> str:
     if not retrieved_at:
         return "UNKNOWN"
@@ -229,13 +238,12 @@ class Discovery:
                                    evidence_id=candidate["source_evidence_id"], candidate_id=candidate_id)
 
     def duplicate_signals(self, name: str, institution: str, profile_url: str | None = None) -> list[dict]:
-        requested_url = canonical_url(profile_url) if profile_url else None
+        requested_url = _safe_canonical_url(profile_url)
         with connect(self.db_path) as db:
             rows = [dict(r) for r in db.execute("SELECT id,name,institution,official_profile_url,email FROM faculty_profiles")]
         result = []
         for row in rows:
-            exact_url = bool(requested_url and row["official_profile_url"] and
-                             canonical_url(row["official_profile_url"]) == requested_url)
+            exact_url = bool(requested_url and _safe_canonical_url(row["official_profile_url"]) == requested_url)
             same_name = _name(row["name"]) == _name(name)
             same_institution = _name(row["institution"]) == _name(institution)
             if exact_url or same_name:
@@ -253,8 +261,8 @@ class Discovery:
         with transaction(self.db_path) as db:
             for index, first in enumerate(rows):
                 for second in rows[index + 1:]:
-                    same_url = bool(first["official_profile_url"] and second["official_profile_url"] and
-                                    canonical_url(first["official_profile_url"]) == canonical_url(second["official_profile_url"]))
+                    first_url, second_url = _safe_canonical_url(first["official_profile_url"]), _safe_canonical_url(second["official_profile_url"])
+                    same_url = bool(first_url and first_url == second_url)
                     same_identity = (_name(first["name"]) == _name(second["name"]) and
                                      _name(first["institution"]) == _name(second["institution"]))
                     if not (same_url or same_identity):

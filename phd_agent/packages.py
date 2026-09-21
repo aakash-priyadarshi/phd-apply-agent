@@ -275,8 +275,14 @@ class PackageBuilder:
                     accepted = not req["file_format"] or suffix in {x.strip().lower().lstrip(".") for x in re.split(r"[,;/ ]+", req["file_format"])}
                     add("FILE_FORMAT", "PASS" if accepted else "BLOCK", "File type accepted" if accepted else "File type not accepted", req["id"], "Export accepted type")
                     if req["filename_rule"]:
-                        valid_name = re.fullmatch(req["filename_rule"], d["canonical_filename"]) is not None
-                        add("FILENAME", "PASS" if valid_name else "BLOCK", "Filename rule met" if valid_name else "Filename rule unmet", req["id"], "Use required filename")
+                        try:
+                            valid_name = re.fullmatch(req["filename_rule"], d["canonical_filename"]) is not None
+                        except re.error:
+                            add("FILENAME", "BLOCK", "Filename rule is not a valid pattern", req["id"],
+                                "Correct the filename pattern from the official source")
+                        else:
+                            add("FILENAME", "PASS" if valid_name else "BLOCK",
+                                "Filename rule met" if valid_name else "Filename rule unmet", req["id"], "Use required filename")
                     if req["page_limit"] and suffix == "pdf" and file.is_file():
                         page_count = len(PdfReader(io.BytesIO(file.read_bytes())).pages)
                         add("PAGE_LIMIT", "PASS" if page_count <= req["page_limit"] else "BLOCK", f"{page_count} pages; limit {req['page_limit']}", req["id"], "Shorten document")
@@ -315,10 +321,15 @@ class PackageBuilder:
         referee_requirements = [r for r in scoped if r["requirement_state"] == "REQUIRED" and
                                 ("referee" in r["original_label"].casefold() or "recommendation" in r["original_label"].casefold())]
         if formal and referee_requirements:
-            counts = [int(m.group()) for r in referee_requirements if (m := re.search(r"\d+",r["original_label"]))]
-            needed = max(counts, default=1)
-            submitted = sum(r["submission_state"] == "SUBMITTED" for r in referees)
-            add("REFEREE_COUNT", "PASS" if submitted >= needed else "BLOCK", f"Submitted referees: {submitted}/{needed}", None, "Confirm required recommendations")
+            counts = [int(m.group()) for r in referee_requirements if (m := re.search(r"\d+", r["original_label"]))]
+            if not counts:
+                add("REFEREE_COUNT_UNKNOWN", "BLOCK", "Required referee count is unresolved", None,
+                    "Record the numeric referee requirement from the official source")
+            else:
+                needed = max(counts)
+                submitted = sum(r["submission_state"] == "SUBMITTED" for r in referees)
+                add("REFEREE_COUNT", "PASS" if submitted >= needed else "BLOCK",
+                    f"Submitted referees: {submitted}/{needed}", None, "Confirm required recommendations")
         elif formal and not referees:
             add("REFEREE_SCOPE", "WARNING", "No referee records; confirm whether required", None, "Review official referee requirement")
         if package["context"] == "FACULTY_OUTREACH":

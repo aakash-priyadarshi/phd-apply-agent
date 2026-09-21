@@ -151,6 +151,7 @@ def test_match_components_unknowns_and_review_history(scenario):
     assert match["components"]["recent_work"]["evidence_ids"] == [s["publication_evidence"]]
     assert match["application_readiness"]["contact_policy"]["state"] == "UNKNOWN"
     assert match["application_readiness"]["deadline"]["state"] == "PASS"
+    assert match["application_readiness"]["eligibility"]["state"] == "PASS"
     engine = MatchEngine(s["db_path"])
     one = engine.review(match["id"],"Demo reviewer","Topic match needs review",{"research_fit":4.5})
     two = engine.review(match["id"],"Demo reviewer","Reconsidered")
@@ -244,3 +245,40 @@ def test_outreach_preflight_uses_contact_rules_not_formal_submission_rules(scena
     rule_ids = {r["rule_id"] for r in result["rules"]}
     assert not {"DEADLINE", "ROUTE", "ELIGIBILITY", "REFEREE_SCOPE"} & rule_ids
     assert any(r["rule_id"] == "OUTREACH_POLICY" and r["severity"] == "BLOCK" for r in result["rules"])
+
+
+def test_missing_eligibility_stays_unknown(scenario):
+    s = scenario
+    readiness = MatchEngine._readiness(
+        None, [], {"eligibility_state": None, "portal_url": None}, None, None, [], [])
+    assert readiness["eligibility"]["state"] == "UNKNOWN"
+    s["ledger"].update_application(s["app"], eligibility_state="UNKNOWN")
+    match = MatchEngine(s["db_path"]).assess(s["faculty"], s["pv"], s["tv"], s["app"])
+    assert match["application_readiness"]["eligibility"]["state"] == "UNKNOWN"
+
+
+def test_preflight_invalid_filename_rule_and_unknown_referee_count(scenario):
+    s = scenario
+    s["ledger"].update_requirement(s["cv_req"], filename_rule="[unclosed")
+    s["ledger"].create_requirement(s["app"], "FORMAL_APPLICATION", "REQUIRED",
+                                   "Letters of recommendation", s["evidence"])
+    cv = _prepare_cv(s)
+    module = s["studio"].create_module(s["pv"], "WHY_PHD",
+        "I evaluated reliable agents with retrieval methods.", [s["fact"]])
+    s["studio"].review_module(module, "Demo reviewer", True)
+    sop = s["studio"].create_statement("SOP", s["pv"], s["tv"], s["app"], s["sop_req"], [module])
+    s["studio"].review_artifact(sop, "Demo reviewer", True)
+    with connect(s["db_path"]) as db:
+        cv_version = db.execute("SELECT document_version_id FROM generated_artifacts WHERE id=?", (cv,)).fetchone()[0]
+        sop_version = db.execute("SELECT document_version_id FROM generated_artifacts WHERE id=?", (sop,)).fetchone()[0]
+    transcript = s["vault"].upload(render_pdf("Transcript", "Completed degree"), "transcript.pdf",
+                                   "SOURCE", "TRANSCRIPT", "Transcript", sensitivity="CONFIDENTIAL")
+    s["vault"].set_approval(transcript["version_id"], True, "Demo reviewer")
+    for req, version in [(s["cv_req"], cv_version), (s["sop_req"], sop_version),
+                         (s["transcript_req"], transcript["version_id"])]:
+        s["vault"].link_to_application(s["app"], req, version)
+    package_id = s["builder"].build(s["app"], s["pv"], s["tv"])
+    rules = {r["rule_id"]: r for r in s["builder"].preflight(package_id)["rules"]}
+    assert rules["FILENAME"]["severity"] == "BLOCK"
+    assert "REFEREE_COUNT_UNKNOWN" in rules
+    assert rules["REFEREE_COUNT_UNKNOWN"]["severity"] == "BLOCK"

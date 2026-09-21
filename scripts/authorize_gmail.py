@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import json
-import os
 
 from google_auth_oauthlib.flow import InstalledAppFlow
 
 from phd_agent.config import load_settings
 from phd_agent.gmail_gateway import GmailGateway
+from phd_agent.security import write_restricted_file
 
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.send",
@@ -32,12 +32,7 @@ def main() -> None:
             raise SystemExit("The active OAuth client is the previously committed client; rotate it first")
     flow = InstalledAppFlow.from_client_secrets_file(str(client_path), SCOPES)
     credentials = flow.run_local_server(port=0)
-    token_path = data_dir / "gmail_token.json"
-    temporary = token_path.with_suffix(".json.tmp")
-    temporary.write_text(credentials.to_json(), encoding="utf-8")
-    os.replace(temporary, token_path)
-    if os.name != "nt":
-        token_path.chmod(0o600)
+    write_restricted_file(data_dir / "gmail_token.json", credentials.to_json())
     if not GmailGateway(data_dir=data_dir).credentials_ready():
         raise SystemExit("OAuth completed, but the rotated client/token pair did not validate")
     print("Gmail OAuth setup complete. Import and review Sent history before any manual send.")

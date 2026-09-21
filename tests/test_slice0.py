@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 import gmail_manager
 import phd_agent.security as security
 import streamlit_app
@@ -78,6 +80,14 @@ def test_tracked_private_file_scan_returns_names_only(monkeypatch, tmp_path):
 
 def test_git_index_has_no_private_runtime_files():
     assert security.tracked_private_paths() == []
+
+
+def test_git_inspection_failure_is_explicit(monkeypatch, tmp_path):
+    def boom(*args, **kwargs):
+        raise OSError("git missing")
+    monkeypatch.setattr(security.subprocess, "run", boom)
+    with pytest.raises(security.GitInspectionFailed):
+        security.tracked_private_paths(tmp_path)
 
 
 def test_gmail_writes_json_token_without_loading_pickle(tmp_path, monkeypatch):

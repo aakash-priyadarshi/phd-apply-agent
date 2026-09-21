@@ -186,9 +186,13 @@ class OutreachService:
             restriction = db.execute("SELECT state FROM contact_restrictions WHERE faculty_profile_id=?", (faculty_id,)).fetchone()
             history_rows = db.execute("""SELECT faculty_profile_id,recipient FROM gmail_threads
                 WHERE direction='OUTBOUND' AND match_state!='REJECTED'""").fetchall()
-            history = sum(r["faculty_profile_id"] == faculty_id or _email(recipient) in
-                          {address.casefold() for _,address in getaddresses([r["recipient"]])}
-                          for r in history_rows)
+            history = 0
+            for row in history_rows:
+                addresses = {address.casefold() for _, address in getaddresses([row["recipient"] or ""]) if address}
+                if not addresses and row["faculty_profile_id"] is None:
+                    continue
+                if row["faculty_profile_id"] == faculty_id or _email(recipient) in addresses:
+                    history += 1
             sent = db.execute("SELECT status FROM outreach_messages WHERE outreach_key=?", (outreach_key,)).fetchone()
             active = db.execute("""SELECT id FROM outreach_packages WHERE outreach_key=?
                 AND status IN ('DRAFT','NEEDS_REVIEW','APPROVED','SCHEDULED','SENDING','SENT','AMBIGUOUS_SEND')
@@ -645,25 +649,30 @@ class OutreachService:
         matched = 0
         with transaction(self.db_path) as db:
             for item in records:
-                addresses = [address.casefold() for _,address in getaddresses([item.get("recipient") or ""]) if address]
-                recipient = addresses[0] if len(addresses) == 1 else (item.get("recipient") or "").strip().casefold()
                 message_id = (item.get("message_id") or "").strip()
                 thread_id = (item.get("thread_id") or "").strip()
-                if not addresses or not recipient or not message_id or not thread_id or not item.get("message_at"):
-                    raise ValueError("Sent record lacks recipient, identifiers, or timestamp")
-                candidates = [r[0] for r in db.execute("SELECT id FROM faculty_profiles WHERE lower(email)=?", (recipient,))] if len(addresses) == 1 else []
-                professor_id = candidates[0] if len(candidates) == 1 else None
-                if professor_id:
-                    matched += 1
+                if not message_id or not thread_id or not item.get("message_at"):
+                    raise ValueError("Sent record lacks identifiers or timestamp")
+                parsed = [address.casefold() for _, address in getaddresses([item.get("recipient") or ""]) if address]
+                unresolved = len(parsed) != 1
+                recipient = parsed[0] if not unresolved else (item.get("recipient") or "").strip()
+                professor_id = None
+                match_confidence = "UNKNOWN"
+                if not unresolved:
+                    candidates = [r[0] for r in db.execute("SELECT id FROM faculty_profiles WHERE lower(email)=?", (recipient,))]
+                    professor_id = candidates[0] if len(candidates) == 1 else None
+                    if professor_id:
+                        matched += 1
+                        match_confidence = "EXACT_EMAIL"
                 package = db.execute("SELECT id,application_id FROM outreach_packages WHERE snapshot_sha256=?",
                                      (item.get("package_identity") or "",)).fetchone() if item.get("package_identity") else None
                 db.execute("""INSERT OR IGNORE INTO gmail_threads
                     (faculty_profile_id,recipient,direction,subject,gmail_message_id,gmail_thread_id,message_at,
                      outreach_package_id,application_id,contact_stage,match_state,match_confidence,source,created_at)
                     VALUES(?,?,'OUTBOUND',?,?,?,?,?,?,'INITIAL',?,?,?,?)""",
-                    (professor_id,recipient,item.get("subject", ""),message_id,thread_id,item["message_at"],
-                     package["id"] if package else None,package["application_id"] if package else None,
-                     "PENDING", "EXACT_EMAIL" if professor_id else "UNKNOWN",source,utc_now()))
+                    (professor_id, recipient, item.get("subject", ""), message_id, thread_id, item["message_at"],
+                     package["id"] if package else None, package["application_id"] if package else None,
+                     "PENDING", match_confidence, source, utc_now()))
             db.execute("INSERT INTO gmail_reconciliation_runs(status,scanned_count,matched_count,run_at,source) VALUES('COMPLETE',?,?,?,?)",
                        (len(records),matched,utc_now(),source))
         return {"scanned": len(records), "exact_email_candidates": matched}
@@ -734,8 +743,15 @@ class OutreachService:
             try:
                 transport.service
                 # A previous import can be stale if the mailbox was used elsewhere.
-                # Reconcile all Sent metadata before the last contact-memory check.
-                self.reconcile_sent(transport.list_sent(), source="GMAIL")
+                # Scan from the last complete Gmail reconcile when a checkpoint exists.
+                with connect(self.db_path) as checkpoint:
+                    last = checkpoint.execute("""SELECT run_at FROM gmail_reconciliation_runs
+                        WHERE status='COMPLETE' AND source='GMAIL' ORDER BY id DESC LIMIT 1""").fetchone()
+                after = datetime.fromisoformat(last["run_at"]) if last else None
+                self.reconcile_sent(
+                    transport.list_sent(after=after) if after else transport.list_sent(),
+                    source="GMAIL",
+                )
             except Exception as error:
                 raise OutreachBlocked(["GMAIL_CONNECTION_NOT_READY"]) from error
         self.build_context(context.professor_id, context.application_id, context.document_package_id,

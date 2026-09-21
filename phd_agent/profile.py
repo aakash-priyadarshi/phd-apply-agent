@@ -67,6 +67,22 @@ def _text_normalized(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip().casefold()
 
 
+def _overlapping_chunks(text: str, size: int = 10000, overlap: int = 1000) -> list[str]:
+    if not text:
+        return []
+    if len(text) <= size:
+        return [text]
+    step = max(1, size - overlap)
+    chunks = []
+    start = 0
+    while start < len(text):
+        chunks.append(text[start:start + size])
+        if start + size >= len(text):
+            break
+        start += step
+    return chunks
+
+
 class ApplicantTruth:
     def __init__(self, db_path: Path | str, vault: DocumentVault | None = None):
         self.db_path = Path(db_path)
@@ -326,7 +342,8 @@ class ApplicantTruth:
             if not page.strip():
                 continue
             # Every page is processed; long pages are split without dropping a section.
-            chunks = [page[start:start + 10000] for start in range(0, len(page), 10000)]
+            chunks = _overlapping_chunks(page)
+            seen_statements: set[str] = set()
             for chunk_index, chunk in enumerate(chunks, 1):
                 response = api.responses.parse(
                     model=model,
@@ -345,6 +362,10 @@ class ApplicantTruth:
                 if not isinstance(batch, CandidateBatch):
                     raise ValueError("Structured candidate extraction returned no parsed result")
                 for candidate in batch.candidates:
+                    statement_key = _text_normalized(candidate.statement)
+                    if statement_key in seen_statements:
+                        continue
+                    seen_statements.add(statement_key)
                     supported = bool(candidate.source_quote.strip()) and (
                         _text_normalized(candidate.source_quote) in _text_normalized(chunk)
                     )

@@ -302,7 +302,7 @@ class Ledger:
             raise ValueError("Document requirements must be linked to an approved version")
         self.update_requirement(requirement_id, fulfilled_at=utc_now() if fulfilled else None)
 
-    def requirement_rows(self, application_id: int) -> list[dict]:
+    def requirement_rows(self, application_id: int, *, verify: bool = True) -> list[dict]:
         sql = """SELECT r.*, e.canonical_url AS source_url,
             ad.id AS mapping_id, ad.document_version_id, ad.notes AS mapping_notes,
             v.version_number, v.sha256, v.storage_key, v.approval_state,
@@ -329,7 +329,10 @@ class Ledger:
                 row["document_state"] = "NEEDS_UPDATE"
             elif row["approval_state"] != "APPROVED":
                 row["document_state"] = "NEEDS_APPROVAL"
-            elif not self.storage.verify_hash(row["storage_key"], row["sha256"]):
+            elif not (
+                self.storage.verify_hash(row["storage_key"], row["sha256"]) if verify
+                else self.storage.exists(row["storage_key"])
+            ):
                 row["document_state"] = "NEEDS_UPDATE"
             else:
                 row["document_state"] = "AVAILABLE"
@@ -451,7 +454,7 @@ class Ledger:
         missing = []
         unknown = []
         for app in self.list_applications():
-            for requirement in self.requirement_rows(app["id"]):
+            for requirement in self.requirement_rows(app["id"], verify=False):
                 item = {"application_id": app["id"], "institution": app["institution"], **requirement}
                 if requirement["requirement_state"] == "REQUIRED" and requirement["document_state"] != "AVAILABLE":
                     missing.append(item)
