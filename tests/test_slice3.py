@@ -154,6 +154,7 @@ def test_match_components_unknowns_and_review_history(scenario):
     assert match["research_fit"] is not None
     assert match["research_fit_coverage"] > 0
     assert match["components"]["recent_work"]["evidence_ids"] == [s["publication_evidence"]]
+    assert match["components"]["experience"]["claim_revision_ids"] == [s["fact"]]
     assert match["application_readiness"]["contact_policy"]["state"] == "UNKNOWN"
     assert match["application_readiness"]["deadline"]["state"] == "PASS"
     assert match["application_readiness"]["eligibility"]["state"] == "PASS"

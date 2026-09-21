@@ -124,6 +124,7 @@ class Acquisition:
     text: str = ""
     html: str = ""
     reason: str | None = None
+    browser_fallback_allowed: bool = True
 
 
 class ProgrammeOrchestrator:
@@ -301,21 +302,27 @@ class ProgrammeOrchestrator:
                 return Acquisition("HUMAN_INPUT_REQUIRED", "STATIC_HTTP", final_url,
                                    reason="The site blocked automated reading or requires human verification")
             return Acquisition("ACQUIRED", "STATIC_HTTP", final_url, text=text, html=html)
-        except (requests.RequestException, ValueError) as error:
+        except ValueError as error:
+            return Acquisition("HUMAN_INPUT_REQUIRED", "STATIC_HTTP", safe_url,
+                               reason=f"Static acquisition failed: {type(error).__name__}",
+                               browser_fallback_allowed=False)
+        except requests.RequestException as error:
             return Acquisition("HUMAN_INPUT_REQUIRED", "STATIC_HTTP", safe_url,
                                reason=f"Static acquisition failed: {type(error).__name__}")
 
     def analyse_url(self, url: str, context_id: int, *, intent_id: int | None = None,
                     browser_worker: BrowserWorker | None = None) -> dict:
         acquisition = self.acquire_static(url)
-        if browser_worker and (acquisition.status != "ACQUIRED" or len(acquisition.text) < MIN_USEFUL_PAGE_TEXT):
+        if (browser_worker and acquisition.browser_fallback_allowed
+                and (acquisition.status != "ACQUIRED" or len(acquisition.text) < MIN_USEFUL_PAGE_TEXT)):
             try:
                 rendered = browser_worker.acquire(acquisition.url)
-                acquisition = Acquisition(rendered.status, rendered.method, rendered.url, rendered.text,
+                rendered_url = _public_url(rendered.url)
+                acquisition = Acquisition(rendered.status, rendered.method, rendered_url, rendered.text,
                                           rendered.html, rendered.human_action)
-            except RuntimeError as error:
+            except (RuntimeError, ValueError) as error:
                 acquisition = Acquisition("HUMAN_INPUT_REQUIRED", "PLAYWRIGHT", acquisition.url,
-                                          reason=str(error))
+                                          reason=str(error), browser_fallback_allowed=False)
         if acquisition.status != "ACQUIRED" or len(acquisition.text) < MIN_USEFUL_PAGE_TEXT:
             reason = acquisition.reason or "The retrieved page did not contain enough readable programme text"
             ingestion_id = self._save_ingestion(intent_id, acquisition.url, acquisition.method,
@@ -632,8 +639,10 @@ class ProgrammeOrchestrator:
             owner_notes=f"Created from candidate #{candidate_id}",
         )
         if payload.get("deadline"):
+            deadline_state = ("VERIFIED" if candidate["field_evidence"].get("deadline", {}).get("state")
+                              == "OPERATOR_CONFIRMED" else "NEEDS_REVIEW")
             self.ledger.create_deadline(application_id, "APPLICATION", payload["deadline"], source,
-                                        timezone=payload.get("deadline_timezone"), verification_state="VERIFIED",
+                                        timezone=payload.get("deadline_timezone"), verification_state=deadline_state,
                                         last_checked_at=utc_now())
         recorded_types = set()
         for document in payload.get("required_documents", []):

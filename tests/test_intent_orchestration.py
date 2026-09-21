@@ -19,6 +19,7 @@ from phd_agent.orchestration import Acquisition, ProgrammeOrchestrator
 from phd_agent.official_search import OfficialSearchResult, OpenAIOfficialSearchProvider, SearchBatch, SearchHit
 from phd_agent.portal import PortalAssistance
 from phd_agent.profile import ApplicantTruth
+from phd_agent.ui_agent import _companion_command
 
 
 @pytest.fixture
@@ -156,12 +157,14 @@ def test_intent_url_to_reviewed_application_and_workload_metrics(applicant):
     with connect(applicant["path"]) as db:
         app = db.execute("SELECT * FROM applications WHERE id=?", (accepted["application_id"],)).fetchone()
         opportunity = db.execute("SELECT * FROM opportunities WHERE id=?", (app["opportunity_id"],)).fetchone()
+        deadline = db.execute("SELECT * FROM deadlines WHERE application_id=?", (app["id"],)).fetchone()
         evidence = db.execute("SELECT * FROM source_evidence WHERE id=?", (accepted["source_evidence_id"],)).fetchone()
         requirements = db.execute("SELECT normalized_document_type,requirement_state FROM requirements WHERE application_id=?",
                                   (accepted["application_id"],)).fetchall()
     assert app and evidence["verification_state"] == "VERIFIED"
     assert opportunity["contact_policy"] == "UNKNOWN"
     assert "Unverified supervisor-contact excerpt" in opportunity["notes"]
+    assert deadline["verification_state"] == "NEEDS_REVIEW"
     assert "fully funded studentship" in evidence["relevant_excerpt"]
     assert {row["normalized_document_type"] for row in requirements} >= {"CV", "RESEARCH_PROPOSAL", "TRANSCRIPT"}
     assert any(row["requirement_state"] == "UNKNOWN" for row in requirements)
@@ -204,7 +207,36 @@ def test_static_acquisition_validates_redirect_before_second_request(applicant, 
     monkeypatch.setattr("phd_agent.orchestration.requests.get", fake_get)
     result = ProgrammeOrchestrator(applicant["path"]).acquire_static("https://example.edu/start")
     assert result.status == "HUMAN_INPUT_REQUIRED"
+    assert result.browser_fallback_allowed is False
     assert calls == ["https://example.edu/start"]
+
+    class BrowserMustNotRun:
+        def acquire(self, url):
+            raise AssertionError("Private redirect rejection must not fall back to Playwright")
+
+    orchestrator = ProgrammeOrchestrator(applicant["path"])
+    monkeypatch.setattr(orchestrator, "acquire_static", lambda url: result)
+    fallback = orchestrator.analyse_url(
+        "https://example.edu/start", applicant["context"]["id"], browser_worker=BrowserMustNotRun())
+    assert fallback["status"] == "HUMAN_INPUT_REQUIRED"
+
+
+def test_browser_acquisition_rejects_non_public_final_destination(applicant, monkeypatch):
+    orchestrator = ProgrammeOrchestrator(applicant["path"])
+    monkeypatch.setattr(orchestrator, "acquire_static", lambda url: Acquisition(
+        "HUMAN_INPUT_REQUIRED", "STATIC_HTTP", url, reason="JavaScript required"))
+
+    class PrivateRedirectBrowser:
+        def acquire(self, url):
+            return type("Rendered", (), {
+                "status": "ACQUIRED", "method": "PLAYWRIGHT", "url": "http://127.0.0.1/private",
+                "text": "private response " * 100, "html": "", "human_action": None,
+            })()
+
+    result = orchestrator.analyse_url(
+        "https://example.edu/start", applicant["context"]["id"], browser_worker=PrivateRedirectBrowser())
+    assert result["status"] == "HUMAN_INPUT_REQUIRED"
+    assert "public" in result["reason"].casefold()
 
 
 def test_browser_fill_plan_reuses_only_approved_safe_values(applicant):
@@ -242,6 +274,13 @@ def test_model_router_uses_configured_family_and_only_escalates():
     assert router.route("TAILORED_SOP").model == "sol"
     with pytest.raises(ValueError, match="cannot reduce"):
         router.route("TAILORED_SOP", operator_tier="LUNA")
+
+
+def test_browser_companion_command_matches_platform():
+    assert _companion_command(12, "nt") == (
+        ".\\.venv\\Scripts\\python.exe -m scripts.browser_companion 12", "powershell")
+    assert _companion_command(12, "posix") == (
+        "./.venv/bin/python -m scripts.browser_companion 12", "bash")
 
 
 def test_official_search_filters_unofficial_and_non_https_results():

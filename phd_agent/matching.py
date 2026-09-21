@@ -91,7 +91,9 @@ class MatchEngine:
         topic_evidence = [x["id"] for x in topic_links]
         work = [p for p in publications if p["year"] and p["year"] >= date.today().year - 5]
         work_text = " ".join(p["title"] + " " + (p["abstract_text"] or "") for p in work)
-        claim_text = " ".join(c["claim_text"] for c in claims if c["classification"] != "ASPIRATION")
+        fallback_claims = [c for c in claims if c["classification"] != "ASPIRATION"]
+        claim_text = " ".join(c["claim_text"] for c in fallback_claims)
+        experience_claim_ids = [c["id"] for c in fallback_claims]
         context_service = ApplicantResearchContextService(self.db_path)
         applicant_context = context_service.build_current(
             profile_id=track["profile_id"], profile_version_id=profile_version_id,
@@ -104,12 +106,14 @@ class MatchEngine:
         demonstrated = [item for item in context_retrieval.items if item.classification == "DEMONSTRATED"]
         if demonstrated:
             claim_text = " ".join(item.text for item in demonstrated)
+            experience_claim_ids = sorted({claim_id for item in demonstrated
+                                           for claim_id in item.claim_revision_ids})
         specs = {
             "topic": (track["title"] + " " + track["research_problem"], faculty_text, [], topic_evidence),
             "method": (track["proposed_methodology"], faculty_text + " " + work_text, [], topic_evidence + [p["source_evidence_id"] for p in work]),
             "recent_work": (track["research_problem"] + " " + track["proposed_methodology"], work_text, [], [p["source_evidence_id"] for p in work]),
             "experience": (claim_text, faculty_text + " " + work_text,
-                list(context_retrieval.claim_revision_ids),
+                experience_claim_ids,
                 topic_evidence + [p["source_evidence_id"] for p in work]),
             "proposed_direction": (track["research_questions"] + " " + track["expected_contribution"], faculty_text + " " + work_text, json.loads(track["supporting_claim_revision_ids_json"]), topic_evidence + [p["source_evidence_id"] for p in work]),
         }

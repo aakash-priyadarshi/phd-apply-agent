@@ -27,6 +27,12 @@ NAVIGATION = (
 )
 
 
+def _companion_command(plan_id: int, platform_name: str | None = None) -> tuple[str, str]:
+    if (platform_name or os.name) == "nt":
+        return f".\\.venv\\Scripts\\python.exe -m scripts.browser_companion {plan_id}", "powershell"
+    return f"./.venv/bin/python -m scripts.browser_companion {plan_id}", "bash"
+
+
 def _styles() -> None:
     st.markdown("""
     <style>
@@ -510,7 +516,8 @@ def _browser(path: Path, context: dict, reviewer: str) -> None:
             if _act(lambda: FormPlanService(path).approve(plan_id, reviewer), "Fill plan approved for local execution"):
                 st.rerun()
         if plan["status"] in {"APPROVED", "FILLED"}:
-            st.code(f".\\.venv\\Scripts\\python.exe -m scripts.browser_companion {plan_id}", language="powershell")
+            command, language = _companion_command(plan_id)
+            st.code(command, language=language)
             st.caption("Run this on the applicant's computer. The companion uses a local browser profile and closes without submitting.")
 
 
