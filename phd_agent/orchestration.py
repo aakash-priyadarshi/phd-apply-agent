@@ -255,8 +255,9 @@ class ProgrammeOrchestrator:
         return {"route": route, "hits": len(hits), "candidates": created, "human_fallbacks": fallbacks}
 
     def acquire_static(self, url: str) -> Acquisition:
-        safe_url = _public_url(url)
+        safe_url = "invalid://public-url"
         try:
+            safe_url = _public_url(url)
             current_url = safe_url
             response = None
             for _ in range(6):
@@ -273,8 +274,12 @@ class ProgrammeOrchestrator:
                 raise ValueError("Programme page exceeded the redirect limit")
             if response is None:
                 raise ValueError("Programme page returned no response")
-            response.raise_for_status()
             final_url = current_url
+            if response.status_code in {401, 403, 429}:
+                response.close()
+                return Acquisition("HUMAN_INPUT_REQUIRED", "STATIC_HTTP", final_url,
+                                   reason="The site blocked automated reading or requires human verification")
+            response.raise_for_status()
             declared = int(response.headers.get("content-length", "0") or 0)
             if declared > MAX_PAGE_BYTES:
                 raise ValueError("Programme page exceeds the safe acquisition size")
@@ -297,8 +302,7 @@ class ProgrammeOrchestrator:
             for node in soup(["script", "style", "noscript", "svg"]):
                 node.decompose()
             text = soup.get_text("\n", strip=True)
-            if response.status_code in {401, 403, 429} or re.search(
-                    r"captcha|access denied|verify you are human|enable javascript", text, re.I):
+            if re.search(r"captcha|access denied|verify you are human|enable javascript", text, re.I):
                 return Acquisition("HUMAN_INPUT_REQUIRED", "STATIC_HTTP", final_url,
                                    reason="The site blocked automated reading or requires human verification")
             return Acquisition("ACQUIRED", "STATIC_HTTP", final_url, text=text, html=html)
@@ -566,8 +570,13 @@ class ProgrammeOrchestrator:
             raise ValueError("Reviewer required")
         candidate = self.get_candidate(candidate_id)
         if candidate["review_state"] == "ACCEPTED":
+            with connect(self.db_path) as db:
+                application = db.execute("SELECT opportunity_id FROM applications WHERE id=?",
+                                         (candidate["accepted_application_id"],)).fetchone()
             return {"programme_id": candidate["accepted_programme_id"],
-                    "application_id": candidate["accepted_application_id"]}
+                    "opportunity_id": application["opportunity_id"] if application else None,
+                    "application_id": candidate["accepted_application_id"],
+                    "source_evidence_id": candidate["source_evidence_id"]}
         if candidate["review_state"] == "REJECTED":
             raise ValueError("Rejected candidate cannot be accepted")
         payload = candidate["payload"]

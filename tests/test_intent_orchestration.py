@@ -165,6 +165,7 @@ def test_intent_url_to_reviewed_application_and_workload_metrics(applicant):
     assert opportunity["contact_policy"] == "UNKNOWN"
     assert "Unverified supervisor-contact excerpt" in opportunity["notes"]
     assert deadline["verification_state"] == "NEEDS_REVIEW"
+    assert orchestrator.accept_candidate(candidate["id"], "Reviewer") == accepted
     assert "fully funded studentship" in evidence["relevant_excerpt"]
     assert {row["normalized_document_type"] for row in requirements} >= {"CV", "RESEARCH_PROPOSAL", "TRANSCRIPT"}
     assert any(row["requirement_state"] == "UNKNOWN" for row in requirements)
@@ -219,6 +220,34 @@ def test_static_acquisition_validates_redirect_before_second_request(applicant, 
     fallback = orchestrator.analyse_url(
         "https://example.edu/start", applicant["context"]["id"], browser_worker=BrowserMustNotRun())
     assert fallback["status"] == "HUMAN_INPUT_REQUIRED"
+
+
+def test_static_acquisition_returns_safe_fallback_for_invalid_url(applicant):
+    result = ProgrammeOrchestrator(applicant["path"]).acquire_static("http://127.0.0.1/private")
+    assert result.status == "HUMAN_INPUT_REQUIRED"
+    assert result.url == "invalid://public-url"
+    assert result.browser_fallback_allowed is False
+
+
+def test_static_acquisition_classifies_access_status_before_raise(applicant, monkeypatch):
+    class Blocked:
+        status_code = 403
+        headers = {}
+
+        def close(self):
+            self.closed = True
+
+        def raise_for_status(self):
+            raise AssertionError("Blocked statuses must be classified before raise_for_status")
+
+    response = Blocked()
+    monkeypatch.setattr("phd_agent.orchestration.socket.getaddrinfo", lambda *args, **kwargs: [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))])
+    monkeypatch.setattr("phd_agent.orchestration.requests.get", lambda *args, **kwargs: response)
+    result = ProgrammeOrchestrator(applicant["path"]).acquire_static("https://example.edu/private")
+    assert result.status == "HUMAN_INPUT_REQUIRED"
+    assert result.browser_fallback_allowed is True
+    assert response.closed is True
 
 
 def test_browser_acquisition_rejects_non_public_final_destination(applicant, monkeypatch):
