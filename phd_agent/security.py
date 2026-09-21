@@ -42,14 +42,18 @@ def tracked_private_paths(root: Path = APP_ROOT) -> list[str]:
     return private
 
 
+def _restrict_windows_acl(path: Path) -> None:
+    user = os.environ.get("USERNAME") or os.getlogin()
+    subprocess.run(
+        ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:(R,W)"],
+        check=True, capture_output=True,
+    )
+
+
 def restrict_private_file(path: Path) -> None:
     path = Path(path)
     if os.name == "nt":
-        user = os.environ.get("USERNAME") or os.getlogin()
-        subprocess.run(
-            ["icacls", str(path), "/inheritance:r", "/grant:r", f"{user}:(R,W)"],
-            check=True, capture_output=True,
-        )
+        _restrict_windows_acl(path)
         return
     os.chmod(path, 0o600)
 

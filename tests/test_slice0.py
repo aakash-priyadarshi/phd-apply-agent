@@ -108,8 +108,21 @@ def test_write_restricted_file_protects_temp_before_secret_bytes(tmp_path, monke
     assert dest.read_text(encoding="utf-8") == '{"token":"secret"}'
 
 
-def test_write_restricted_file_aborts_when_windows_acl_fails(tmp_path, monkeypatch):
-    monkeypatch.setattr(security.os, "name", "nt")
+def test_write_restricted_file_aborts_when_restriction_fails(tmp_path, monkeypatch):
+    def boom(path):
+        raise subprocess.CalledProcessError(5, "icacls")
+
+    monkeypatch.setattr(security, "restrict_private_file", boom)
+    dest = tmp_path / "gmail_token.json"
+    with pytest.raises(subprocess.CalledProcessError):
+        security.write_restricted_file(dest, '{"token":"secret"}')
+    assert not dest.exists()
+    assert not list(tmp_path.glob("gmail_token.json*"))
+
+
+def test_windows_acl_helper_uses_checked_icacls(tmp_path, monkeypatch):
+    dest = tmp_path / "gmail_token.json"
+    dest.write_text("token", encoding="utf-8")
     monkeypatch.setenv("USERNAME", "tester")
 
     def fail_icacls(*args, **kwargs):
@@ -118,11 +131,8 @@ def test_write_restricted_file_aborts_when_windows_acl_fails(tmp_path, monkeypat
         raise subprocess.CalledProcessError(5, args[0])
 
     monkeypatch.setattr(security.subprocess, "run", fail_icacls)
-    dest = tmp_path / "gmail_token.json"
     with pytest.raises(subprocess.CalledProcessError):
-        security.write_restricted_file(dest, '{"token":"secret"}')
-    assert not dest.exists()
-    assert not list(tmp_path.glob("gmail_token.json*"))
+        security._restrict_windows_acl(dest)
 
 
 def test_gmail_writes_json_token_without_loading_pickle(tmp_path, monkeypatch):
