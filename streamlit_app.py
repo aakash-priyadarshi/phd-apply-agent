@@ -1347,7 +1347,7 @@ def _operator_allowed(settings) -> bool:
 def main():
     """Main Streamlit application function."""
     st.set_page_config(
-        page_title="PhD Outreach Automation - 2-Stage System",
+        page_title="PhD Application Agent",
         page_icon="🎓",
         layout="wide",
         initial_sidebar_state="expanded"
@@ -1371,9 +1371,14 @@ def main():
         if tracked:
             st.warning("Private runtime files are still tracked by Git: " + ", ".join(tracked))
 
-    workspace = st.sidebar.radio("Workspace", ["Application CMS", "Legacy outreach"])
-    if workspace == "Application CMS":
+    workspace = st.sidebar.radio("Workspace", ["Application Agent", "Advanced / Legacy"])
+    if workspace == "Application Agent":
         render_cms(settings.database_path)
+        return
+
+    advanced_area = st.sidebar.radio("Advanced area", ["Data & audit", "Legacy outreach"])
+    if advanced_area == "Data & audit":
+        render_cms(settings.database_path, advanced=True)
         return
 
     # Custom CSS styling

@@ -8,6 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from phd_agent.db import connect, migrate, transaction, utc_now
+from phd_agent.applicant_context import ApplicantResearchContextService
 from phd_agent.documents import DocumentVault
 from phd_agent.ledger import Ledger
 
@@ -63,6 +64,56 @@ class PortalAssistance:
         with connect(self.db_path) as db:
             return [dict(r) for r in db.execute(
                 "SELECT * FROM answer_library ORDER BY field_key, version_number DESC")]
+
+    def draft_context_answer(self, field_key: str, label: str, context_id: int,
+                             *, application_id: int | None = None) -> int:
+        """Create a review-required narrative answer from approved applicant context."""
+        if field_key not in {"RESEARCH_INTERESTS", "AWARDS", "PUBLICATIONS_SUMMARY",
+                             "FUNDING_STATEMENT", "OTHER"}:
+            raise ValueError("Context drafting is limited to narrative application fields")
+        target = ""
+        evidence_ids = []
+        if application_id:
+            with connect(self.db_path) as db:
+                app = db.execute("SELECT * FROM applications WHERE id=?", (application_id,)).fetchone()
+                if not app:
+                    raise ValueError("Application not found")
+                programme = db.execute("SELECT * FROM programmes WHERE id=?", (app["programme_id"],)).fetchone() if app["programme_id"] else None
+                opportunity = db.execute("SELECT * FROM opportunities WHERE id=?", (app["opportunity_id"],)).fetchone() if app["opportunity_id"] else None
+            target = " ".join(str(value or "") for value in (
+                programme["university"] if programme else "", programme["programme_name"] if programme else "",
+                programme["department"] if programme else "", opportunity["research_area"] if opportunity else "",
+                opportunity["eligibility_text"] if opportunity else "",
+            ))
+            if opportunity and opportunity["source_evidence_id"]:
+                evidence_ids.append(opportunity["source_evidence_id"])
+        contexts = ApplicantResearchContextService(self.db_path)
+        applicant_context = contexts.get(context_id)
+        track = applicant_context["context"]["research_track"]
+        research_target = " ".join(filter(None, (
+            track.get("title"), track.get("research_problem"), track.get("proposed_methodology"),
+        )))
+        retrieval = contexts.retrieve(context_id, "APPLICATION_ANSWER",
+                                      " ".join(filter(None, (label, target, research_target))),
+                                      top_k=3, use="application", include_proposed=True)
+        demonstrated = [item.text for item in retrieval.items if item.classification == "DEMONSTRATED"]
+        proposed = [item.text for item in retrieval.items if item.classification == "PROPOSED"]
+        pieces = demonstrated[:2]
+        if field_key in {"RESEARCH_INTERESTS", "OTHER", "FUNDING_STATEMENT"}:
+            pieces += proposed[:1]
+        if not pieces:
+            raise ValueError("No approved applicant context supports this narrative answer")
+        evidence_ids.extend(retrieval.evidence_ids)
+        answer_id = self.save_answer(
+            field_key, label, " ".join(pieces),
+            claim_revision_id=retrieval.claim_revision_ids[0] if retrieval.claim_revision_ids else None,
+            source_evidence_id=evidence_ids[0] if evidence_ids else None,
+        )
+        contexts.link_output(
+            "PORTAL_ANSWER", answer_id, context_id, retrieval.id,
+            provider="deterministic", model="application-answer-v1", prompt_version="grounded-draft-v1",
+        )
+        return answer_id
 
     def add_checklist_field(self, application_id: int, field_key: str, portal_label: str, *,
                             required: bool = True) -> int:

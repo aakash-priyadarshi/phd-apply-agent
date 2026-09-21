@@ -44,6 +44,11 @@ def scenario(tmp_path):
                                       expected_contribution="More reliable retrieval agents.",
                                       supporting_claim_revision_ids=[fact])
     truth.approve_track(tv, "Demo reviewer")
+    base_master = studio.create_master_cv(pv, [
+        {"name":"Research Experience","bullets":[{"text":"I evaluated reliable agents with retrieval methods.","claim_revision_ids":[fact]}]},
+        {"name":"Profile","bullets":[{"text":"I aim to study reliable retrieval agents.","claim_revision_ids":[aim]}]},
+    ])
+    studio.review_master_cv(base_master, "Demo reviewer", True)
     evidence = ledger.create_evidence("https://example.edu/phd", "PROGRAMME", "Reviewed admissions and document requirements", "VERIFIED")
     faculty_evidence = ledger.create_evidence("https://example.edu/faculty/demo", "FACULTY", "Research on retrieval and agent reliability", "VERIFIED")
     publication_evidence = ledger.create_evidence("https://openalex.org/W999", "PUBLICATION", "Stored publication record", "VERIFIED")
@@ -149,6 +154,7 @@ def test_match_components_unknowns_and_review_history(scenario):
     assert match["research_fit"] is not None
     assert match["research_fit_coverage"] > 0
     assert match["components"]["recent_work"]["evidence_ids"] == [s["publication_evidence"]]
+    assert match["components"]["experience"]["claim_revision_ids"] == [s["fact"]]
     assert match["application_readiness"]["contact_policy"]["state"] == "UNKNOWN"
     assert match["application_readiness"]["deadline"]["state"] == "PASS"
     assert match["application_readiness"]["eligibility"]["state"] == "PASS"

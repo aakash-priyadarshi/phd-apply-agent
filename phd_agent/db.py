@@ -269,6 +269,7 @@ from phd_agent.migrations.slice2 import SCHEMA as SLICE_2_SCHEMA, INTEGRITY_TRIG
 from phd_agent.migrations.slice3 import SCHEMA as SLICE_3_SCHEMA
 from phd_agent.migrations.slice4 import SCHEMA as SLICE_4_SCHEMA
 from phd_agent.migrations.slice5 import SCHEMA as SLICE_5_SCHEMA
+from phd_agent.migrations.slice6 import SCHEMA as SLICE_6_SCHEMA
 
 
 MIGRATIONS = (
@@ -279,6 +280,7 @@ MIGRATIONS = (
     (5, "slice_3_reviewed_materials_and_packages", SLICE_3_SCHEMA),
     (6, "slice_4_reviewed_outreach_and_contact_memory", SLICE_4_SCHEMA),
     (7, "slice_5_portal_followthrough_and_backup", SLICE_5_SCHEMA),
+    (8, "intent_first_orchestration_and_applicant_context", SLICE_6_SCHEMA),
 )
 
 

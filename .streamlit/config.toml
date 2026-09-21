@@ -7,3 +7,13 @@ allowedHosts = ["phd-agent-production.up.railway.app", "localhost", "127.0.0.1"]
 
 [browser]
 gatherUsageStats = false
+
+[theme]
+base = "light"
+primaryColor = "#2457D6"
+backgroundColor = "#F7F6F2"
+secondaryBackgroundColor = "#EEF0EC"
+textColor = "#17202A"
+linkColor = "#2457D6"
+baseRadius = "small"
+buttonRadius = "small"
