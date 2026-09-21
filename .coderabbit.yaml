@@ -1,0 +1,60 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: en-US
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  auto_review:
+    enabled: true
+    drafts: false
+  path_filters:
+    - "!**/*.pdf"
+    - "!**/*.db"
+    - "!**/__pycache__/**"
+  path_instructions:
+    - path: "**/*.{py,yaml,yml}"
+      instructions: |
+        Prioritize correctness and data safety over stylistic suggestions.
+
+        Pay particular attention to:
+        - SQLite migration safety and backwards compatibility
+        - preservation of the 156 legacy professor records
+        - immutable document/package history
+        - SHA-256/file-integrity checks
+        - accidental Gmail sends
+        - idempotency and ambiguous-send recovery
+        - applicant PII or credentials entering Git
+        - unapproved claims leaking into generated documents
+        - FACT / INFERENCE / ASPIRATION boundaries
+        - stale or unsupported professor evidence
+        - application requirement UNKNOWN handling
+        - deterministic package selection
+        - PASS/WARNING/BLOCK preflight behavior
+        - duplicate professor/contact handling
+        - source-evidence provenance
+        - local path traversal / unsafe filenames
+        - attachment hash verification before sending
+        - transaction boundaries and foreign-key integrity
+
+        Do not request architectural rewrites merely for style.
+        The project intentionally uses Python + Streamlit + SQLite.
+        Do not recommend Redis, Celery, FastAPI, React, vector databases,
+        or distributed infrastructure unless a concrete correctness issue
+        requires them.
+    - path: "phd_agent/migrations/**"
+      instructions: |
+        Migrations must be additive and backwards compatible. Flag any rewrite
+        of existing professor rows, dropped columns, or non-transactional
+        schema changes. Preserve foreign-key integrity.
+    - path: "tests/**"
+      instructions: |
+        Normal tests must not send email, submit portal forms, or require live
+        Gmail. Live Gmail tests must stay skipped unless explicit environment
+        flags are set.
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - "README.md"
+      - "docs/implementation-plan-2026-27.md"
