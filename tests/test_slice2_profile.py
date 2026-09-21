@@ -60,6 +60,8 @@ def test_fact_inference_and_aspiration_rules(truth):
     false_aspiration = truth.create_claim(profile, "OTHER", "I developed novel RL agents", "goal", "ASPIRATION")
     with pytest.raises(ValueError, match="future aim"):
         truth.review_claim(false_aspiration, True, "Applicant")
+    assert truth._aspiration_wording("I seek to investigate reliable agent evaluation.")
+    assert not truth._aspiration_wording("I developed AI planning systems.")
 
 
 def test_docx_ingestion_and_structured_candidates_reject_unsupported(truth):

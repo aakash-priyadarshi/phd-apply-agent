@@ -216,9 +216,14 @@ class ApplicantTruth:
     @staticmethod
     def _aspiration_wording(text: str) -> bool:
         lowered = text.casefold()
-        return any(phrase in lowered for phrase in (
+        return any(re.search(rf"\b{re.escape(phrase)}\b", lowered) for phrase in (
             "i aim", "i hope", "i want", "i plan", "i intend", "i propose",
-            "i would like", "future research", "my goal", "i am interested in",
+            "i would like", "i seek", "i aspire", "i wish", "i am eager",
+            "i am keen", "i look forward", "i envision", "i expect to",
+            "i am motivated to", "i am determined to", "i am committed to",
+            "this motivates me to", "future research", "my aim", "my goal",
+            "my objective", "my ambition", "my aspiration", "my research interest",
+            "my research interests", "i am interested in",
         ))
 
     def list_claims(self, profile_id: int, latest_only: bool = True) -> list[dict]:

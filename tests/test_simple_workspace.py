@@ -141,6 +141,64 @@ def test_academic_documents_wait_for_authenticity_review(tmp_path):
     assert any("stored and parsed" in warning for warning in result.warnings)
 
 
+def test_model_aspirations_do_not_block_cv_and_sop_import(tmp_path, monkeypatch):
+    workspace = ProfileWorkspace(tmp_path / "phd_outreach.db")
+
+    def extracted_candidates(profile_id, extraction_id, **_kwargs):
+        with connect(workspace.db_path) as db:
+            version_id = db.execute(
+                "SELECT document_version_id FROM applicant_document_extractions WHERE id=?",
+                (extraction_id,),
+            ).fetchone()[0]
+        workspace.truth.create_claim(
+            profile_id, "OTHER", "I seek to investigate reliable agent evaluation.",
+            "research_goal", "ASPIRATION", source_document_version_id=version_id,
+            source_location="SOP", extraction_id=extraction_id, confidence=0.9,
+        )
+        workspace.truth.create_claim(
+            profile_id, "OTHER", "Reliable agent evaluation across long-horizon tasks.",
+            "research_goal", "ASPIRATION", source_document_version_id=version_id,
+            source_location="SOP", extraction_id=extraction_id, confidence=0.7,
+        )
+        return {"pending": 2, "rejected_unsupported": 0}
+
+    monkeypatch.setattr(workspace.truth, "extract_candidates", extracted_candidates)
+    result = workspace.build(
+        "Aakash Example", "Reliable AI agents",
+        [ProfileUpload("statement-of-purpose.txt", CV_TEXT)], api_key="configured",
+    )
+    claims = workspace.truth.list_claims(result.profile_id)
+    assert any(claim["claim_text"].startswith("I seek to investigate")
+               and claim["review_status"] == "APPROVED" for claim in claims)
+    assert any(claim["claim_text"].startswith("Reliable agent evaluation")
+               and claim["review_status"] == "REJECTED" for claim in claims)
+    assert any("unclear aspiration" in warning for warning in result.warnings)
+
+
+def test_retry_processes_pending_claims_after_an_earlier_partial_import(tmp_path):
+    workspace = ProfileWorkspace(tmp_path / "phd_outreach.db")
+    first = workspace.build(
+        "Aakash Example", "Reliable AI agents", [ProfileUpload("cv.txt", CV_TEXT)])
+    document = workspace.source_documents()[0]
+    with connect(workspace.db_path) as db:
+        extraction_id = db.execute(
+            "SELECT id FROM applicant_document_extractions WHERE document_version_id=?",
+            (document["version_id"],),
+        ).fetchone()[0]
+    pending_id = workspace.truth.create_claim(
+        first.profile_id, "OTHER", "Reliable agent evaluation across long-horizon tasks.",
+        "research_goal", "ASPIRATION", source_document_version_id=document["version_id"],
+        source_location="SOP", extraction_id=extraction_id, confidence=0.7,
+    )
+    retried = workspace.build("Aakash Example", "Reliable AI agents")
+    with connect(workspace.db_path) as db:
+        pending = db.execute(
+            "SELECT review_status FROM claim_revisions WHERE id=?", (pending_id,)
+        ).fetchone()
+    assert pending["review_status"] == "REJECTED"
+    assert any("unclear aspiration" in warning for warning in retried.warnings)
+
+
 def test_simple_workspace_renders_setup_then_task_navigation(tmp_path, monkeypatch):
     monkeypatch.setenv("PHD_AGENT_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("PHD_AGENT_ENV", "development")
