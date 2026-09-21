@@ -6,7 +6,7 @@ import json
 
 from google_auth_oauthlib.flow import InstalledAppFlow
 
-from phd_agent.config import load_settings
+from phd_agent.config import load_settings, refuse_hosted_scripts
 from phd_agent.gmail_gateway import GmailGateway
 from phd_agent.security import write_restricted_file
 
@@ -16,6 +16,7 @@ SCOPES = ["https://www.googleapis.com/auth/gmail.send",
 
 
 def main() -> None:
+    refuse_hosted_scripts()
     data_dir = load_settings().data_dir
     client_path = data_dir / "credentials.json"
     old_path = data_dir / "backups" / "credentials-legacy.json"

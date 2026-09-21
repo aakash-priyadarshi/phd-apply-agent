@@ -33,6 +33,10 @@ class DocumentStorage(Protocol):
     def export(self, key: str, destination: Path) -> Path: ...
 
 
+# S3CompatibleDocumentStorage / Railway Bucket is a post-deployment enhancement,
+# not a launch blocker. Keep this interface so document identities stay stable.
+
+
 class LocalDocumentStorage:
     backend = "LOCAL"
 

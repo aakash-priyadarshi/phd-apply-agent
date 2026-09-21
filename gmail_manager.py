@@ -69,9 +69,11 @@ class GmailManager:
                 
                 if not creds:
                     if not os.path.exists(self.credentials_file):
-                        logger.error(f"Credentials file not found: {self.credentials_file}")
+                        logger.error("Gmail credentials file is not configured")
                         return False
-                    
+                    if not load_settings().interactive_oauth_allowed:
+                        logger.error("Interactive Gmail OAuth is disabled on hosted deployments")
+                        return False
                     flow = InstalledAppFlow.from_client_secrets_file(
                         self.credentials_file, self.scopes)
                     creds = flow.run_local_server(port=0)

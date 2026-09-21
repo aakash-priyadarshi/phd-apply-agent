@@ -15,6 +15,22 @@ cp .env.example .env
 .venv/bin/python -m streamlit run streamlit_app.py
 ```
 
+Local unauthenticated use requires `PHD_AGENT_AUTH_DISABLED=true` in `.env`. That bypass is ignored when `PHD_AGENT_ENV=production` or the process is running on Railway.
+
+Hosted start command (Railway injects `PORT`; do not hard-code it):
+
+```sh
+python -m phd_agent.launch
+```
+
+That wrapper writes OIDC secrets and validates the allowlist, then execs:
+
+```sh
+streamlit run streamlit_app.py --server.address=0.0.0.0 --server.port=$PORT --server.headless=true
+```
+
+Full Railway steps, OIDC, volume backups, Gmail bootstrap, and rollback are in [docs/railway-deployment.md](docs/railway-deployment.md). Production uses `PHD_AGENT_DATA_DIR=/data` on one persistent volume. The CMS starts without OpenAI or Gmail. Auto-send stays disabled.
+
 For tests, install `requirements-dev.txt` in the same environment and run `python -m pytest -q`. Normal tests do not send email. The two Gmail integration tests require explicit environment flags and a test recipient.
 
 ## Local data
@@ -37,7 +53,7 @@ data/
 
 The app copies non-credential files from the old repository-root layout into `data/` on first run without overwriting newer local files. Before this upgrade, the existing database was copied byte-for-byte to `data/backups/` and its active copy was verified. Back up `data/` regularly. `PHD_AGENT_DATA_DIR` can point to another local directory; relative values are resolved from the repository root. A custom directory inside the repository must be under the ignored `data/` tree.
 
-The application ledger uses additive SQLite migrations recorded in `schema_migrations`. Slice 2 adds profile, claim, research track, catalogue, faculty verification, publication, and assessment tables without changing legacy professor rows. The approved Slice 1 baseline is backed up under `data/backups/phd_outreach-slice1-eefd5b8c.db`. Stop the app before any restore and keep a separate copy of the current database first; restoring the baseline discards later local work. Vault files under `data/documents/` need their own backup alongside the database.
+The application ledger uses additive SQLite migrations recorded in `schema_migrations`. Slice 2 adds profile, claim, research track, catalogue, faculty verification, publication, and assessment tables without changing legacy professor rows. The approved Slice 1 baseline is backed up under `data/backups/phd_outreach-slice1-eefd5b8c.db`. Stop the app before any restore and keep a separate copy of the current database first; restoring the baseline discards later local work. Vault files under `data/documents/` need their own backup alongside the database. On Railway, put SQLite and the Vault on the `/data` volume and enable Railway volume backups; do not treat in-app backups on the same volume as disaster recovery.
 
 ## Manual application workflow
 

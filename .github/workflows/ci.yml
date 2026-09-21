@@ -5,7 +5,7 @@ on:
   push:
     branches:
       - main
-      - plan/2026-27-application-cms
+      - plan/**
 
 permissions:
   contents: read

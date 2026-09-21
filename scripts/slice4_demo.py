@@ -8,6 +8,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+from phd_agent.config import refuse_hosted_scripts
 from phd_agent.db import connect, transaction, utc_now
 from phd_agent.discovery import Discovery
 from phd_agent.documents import DocumentVault
@@ -137,6 +138,7 @@ def run(output_dir: Path, source_db: Path | None = None) -> dict:
 
 
 if __name__ == "__main__":
+    refuse_hosted_scripts()
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir",type=Path,default=Path("data/slice4-demo"))
     parser.add_argument("--source-db",type=Path,default=None)
