@@ -40,6 +40,9 @@ def _writable(directory: Path) -> None:
         raise StartupError("Persistent data directory is not writable") from error
 
 
+LOG_FILE_HANDLER = "phd_agent.runtime.file"
+
+
 def volume_unavailable(data_dir: Path, environ: Mapping[str, str]) -> bool:
     if not data_dir.exists() or not data_dir.is_dir():
         return True
@@ -117,8 +120,21 @@ def _configure_logging(settings: Settings) -> None:
     root = logging.getLogger()
     if settings.hosted:
         root.setLevel(logging.WARNING)
+    wanted = os.path.abspath(str(settings.log_path))
+    existing = None
+    for handler in list(root.handlers):
+        if getattr(handler, "name", "") != LOG_FILE_HANDLER:
+            continue
+        if os.path.abspath(getattr(handler, "baseFilename", "")) == wanted:
+            existing = handler
+            continue
+        root.removeHandler(handler)
+        handler.close()
+    if existing is not None:
+        return
     try:
         handler = logging.FileHandler(settings.log_path, encoding="utf-8")
+        handler.set_name(LOG_FILE_HANDLER)
         handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
         root.addHandler(handler)
     except OSError:
@@ -136,17 +152,18 @@ def prepare_runtime(
         settings = load_settings(root, env if environ is not None else None)
     except ValueError as error:
         raise StartupError(str(error)) from error
-    if volume_unavailable(settings.data_dir, env):
-        raise StartupError(
-            "Persistent data directory is unavailable. Mount the Railway volume before starting."
-        )
-    _writable(settings.data_dir)
     if settings.hosted:
+        if volume_unavailable(settings.data_dir, env):
+            raise StartupError(
+                "Persistent data directory is unavailable. Mount the Railway volume before starting."
+            )
+        _writable(settings.data_dir)
         for name in RUNTIME_SUBDIRS:
             (settings.data_dir / name).mkdir(mode=0o700, exist_ok=True)
     else:
         ensure_data_layout(settings.data_dir, root)
         (settings.data_dir / "exports").mkdir(exist_ok=True)
+        _writable(settings.data_dir)
     materialize_gmail_files(settings, env)
     migrate(settings.database_path)
     check_sqlite_integrity(settings.database_path)

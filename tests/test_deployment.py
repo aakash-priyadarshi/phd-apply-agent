@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import json
+import logging
+import tomllib
 from pathlib import Path
 
 import pytest
 
 import gmail_manager
+from phd_agent import launch
 from phd_agent.access import access_state
-from phd_agent.config import Settings, hosted_from_environ, load_settings, refuse_hosted_scripts
+from phd_agent.config import GOOGLE_OIDC_METADATA, Settings, hosted_from_environ, load_settings, refuse_hosted_scripts
 from phd_agent.db import connect
 from phd_agent.documents import DocumentVault
-from phd_agent.runtime import StartupError, prepare_runtime, write_oidc_secrets
+from phd_agent.runtime import LOG_FILE_HANDLER, StartupError, prepare_runtime, write_oidc_secrets
 from phd_agent.security import tracked_private_paths
 
 
@@ -152,6 +155,42 @@ def test_missing_production_volume_is_not_created(tmp_path):
     assert not missing.exists()
 
 
+def test_local_data_dir_is_created_when_missing(tmp_path):
+    data = tmp_path / "data"
+    assert not data.exists()
+    settings = prepare_runtime(ROOT, {
+        "PHD_AGENT_ENV": "development",
+        "PHD_AGENT_DATA_DIR": str(data),
+        "PHD_AGENT_AUTH_DISABLED": "true",
+    }, secrets_path=tmp_path / "secrets.toml")
+    assert data.is_dir()
+    assert (data / "documents").is_dir()
+    assert settings.database_path.is_file()
+    assert not (tmp_path / "secrets.toml").exists()
+
+
+def test_hosted_startup_requires_allowlist(tmp_path):
+    volume = tmp_path / "volume"
+    volume.mkdir()
+    env = _hosted_env(volume)
+    env["PHD_AGENT_ALLOWED_EMAILS"] = ""
+    with pytest.raises(StartupError, match="ALLOWED_EMAILS"):
+        _prepare(tmp_path, env)
+
+
+def test_prepare_runtime_reuses_log_handler(tmp_path):
+    volume = tmp_path / "volume"
+    volume.mkdir()
+    env = _hosted_env(volume)
+    _prepare(tmp_path, env)
+    root = logging.getLogger()
+    first = [handler for handler in root.handlers if getattr(handler, "name", "") == LOG_FILE_HANDLER]
+    _prepare(tmp_path, env)
+    second = [handler for handler in root.handlers if getattr(handler, "name", "") == LOG_FILE_HANDLER]
+    assert len(first) == 1
+    assert first == second
+
+
 def test_gmail_env_materializes_restricted_files_without_oauth(tmp_path):
     volume = tmp_path / "volume"
     volume.mkdir()
@@ -184,17 +223,54 @@ def test_demo_scripts_refuse_production():
 
 def test_start_command_uses_port_env_and_health_route():
     text = (ROOT / "railway.toml").read_text(encoding="utf-8")
-    assert "--server.port=$PORT" in text
+    assert "python -m phd_agent.launch" in text
     assert "8501" not in text
     assert 'healthcheckPath = "/_stcore/health"' in text
-    assert "--server.address=0.0.0.0" in text
-    assert "--server.headless=true" in text
+    argv = launch.streamlit_command("8080")
+    assert "--server.port=8080" in argv
+    assert "--server.address=0.0.0.0" in argv
+    assert "--server.headless=true" in argv
+    assert "8501" not in argv
+
+
+def test_launch_writes_oidc_secrets_before_exec(tmp_path):
+    volume = tmp_path / "volume"
+    volume.mkdir()
+    env = _hosted_env(volume)
+    env["PORT"] = "4321"
+    executed = []
+
+    def fake_exec(file, args):
+        executed.append((file, list(args)))
+        raise SystemExit(0)
+
+    with pytest.raises(SystemExit) as stopped:
+        launch.main(env, root=ROOT, secrets_path=tmp_path / "secrets.toml", exec_fn=fake_exec)
+    assert stopped.value.code == 0
+    assert executed
+    assert "--server.port=4321" in executed[0][1]
+    parsed = tomllib.loads((tmp_path / "secrets.toml").read_text(encoding="utf-8"))
+    assert parsed["auth"]["client_id"] == "test-client-id"
+
+
+def test_launch_refuses_hosted_start_without_allowlist(tmp_path):
+    volume = tmp_path / "volume"
+    volume.mkdir()
+    env = _hosted_env(volume)
+    env["PHD_AGENT_ALLOWED_EMAILS"] = ""
+    env["PORT"] = "8080"
+    executed = []
+    with pytest.raises(SystemExit) as stopped:
+        launch.main(env, root=ROOT, secrets_path=tmp_path / "secrets.toml",
+                    exec_fn=lambda file, args: executed.append(args))
+    assert stopped.value.code == 1
+    assert executed == []
+    assert not (tmp_path / "secrets.toml").exists()
 
 
 def test_oidc_secrets_are_written_without_network(tmp_path):
     dest = tmp_path / "secrets.toml"
     write_oidc_secrets(dest, _hosted_env(tmp_path))
-    text = dest.read_text(encoding="utf-8")
-    assert "test-client-id" in text
-    assert "[auth]" in text
-    assert "accounts.google.com" in text
+    parsed = tomllib.loads(dest.read_text(encoding="utf-8"))
+    assert parsed["auth"]["client_id"] == "test-client-id"
+    assert parsed["auth"]["server_metadata_url"] == GOOGLE_OIDC_METADATA

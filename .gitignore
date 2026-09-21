@@ -6,6 +6,10 @@ __pycache__/
 venv/
 phd_outreach_env/
 
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
 .streamlit/secrets.toml
 credentials*.json
 *token*.json

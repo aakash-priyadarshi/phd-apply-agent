@@ -4,7 +4,7 @@
 builder = "RAILPACK"
 
 [deploy]
-startCommand = "streamlit run streamlit_app.py --server.address=0.0.0.0 --server.port=$PORT --server.headless=true"
+startCommand = "python -m phd_agent.launch"
 healthcheckPath = "/_stcore/health"
 healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"

@@ -20,6 +20,12 @@ Local unauthenticated use requires `PHD_AGENT_AUTH_DISABLED=true` in `.env`. Tha
 Hosted start command (Railway injects `PORT`; do not hard-code it):
 
 ```sh
+python -m phd_agent.launch
+```
+
+That wrapper writes OIDC secrets and validates the allowlist, then execs:
+
+```sh
 streamlit run streamlit_app.py --server.address=0.0.0.0 --server.port=$PORT --server.headless=true
 ```
 

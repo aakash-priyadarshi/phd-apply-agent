@@ -6,17 +6,19 @@ This is a single-user Streamlit CMS. The first hosted deployment uses one Stream
 
 ## Start command
 
-Set the service start command to:
+Railway should start the service with:
+
+```sh
+python -m phd_agent.launch
+```
+
+The wrapper runs `prepare_runtime()` first so `.streamlit/secrets.toml` and the operator allowlist exist before Streamlit loads OIDC. It then execs the equivalent of:
 
 ```sh
 streamlit run streamlit_app.py --server.address=0.0.0.0 --server.port=$PORT --server.headless=true
 ```
 
-Do not hard-code a port. Railway injects `PORT`. The same command is in `railway.toml`. If a Dockerfile is added later, wrap the command in a shell so `$PORT` expands:
-
-```sh
-/bin/sh -c 'exec streamlit run streamlit_app.py --server.address=0.0.0.0 --server.port=$PORT --server.headless=true'
-```
+Do not hard-code a port. Railway injects `PORT`. The wrapper is the `startCommand` in `railway.toml`.
 
 Health checks use Streamlit’s built-in route `/_stcore/health`, also set in `railway.toml`. Railway only probes that path at deploy time. A volume-backed service still has brief downtime on redeploy because two deployments cannot mount the same volume.
 
