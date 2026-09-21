@@ -91,6 +91,15 @@ def test_research_focus_change_preserves_the_previous_summary(tmp_path):
     assert "Multimodal agent evaluation" in second.summary_path.read_text(encoding="utf-8")
 
 
+def test_deterministic_candidates_do_not_promote_historic_seeking_to_aspirations():
+    line = "I was seeking to investigate reliable agent evaluation methods."
+
+    candidate = profile_workspace._deterministic_candidates(line)[0]
+
+    assert candidate["classification"] == "FACT"
+    assert candidate["statement"] == line
+
+
 def test_extract_text_rejects_oversized_files_and_expanded_docx(tmp_path, monkeypatch):
     monkeypatch.setattr(profile_workspace, "MAX_PROFILE_DOCUMENT_BYTES", 20)
     with pytest.raises(ValueError, match="profile-document limit"):

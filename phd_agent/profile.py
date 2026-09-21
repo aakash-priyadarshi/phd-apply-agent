@@ -216,6 +216,12 @@ class ApplicantTruth:
     @staticmethod
     def _aspiration_wording(text: str) -> bool:
         lowered = text.casefold()
+        if re.search(
+            r"\bmy (?:aim|goal|objective|ambition|aspiration|research interests?)\s+"
+            r"(?:was|were|had been)\b",
+            lowered,
+        ):
+            return False
         return any(re.search(rf"\b{re.escape(phrase)}\b", lowered) for phrase in (
             "i aim", "i hope", "i want", "i plan", "i intend", "i propose",
             "i would like", "i seek", "i aspire", "i wish", "i am eager",

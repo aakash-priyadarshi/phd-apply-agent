@@ -165,7 +165,7 @@ def _deterministic_candidates(text: str, *, limit: int = 36) -> list[dict]:
             continue
         seen.add(key)
         future = ApplicantTruth._aspiration_wording(line) or bool(re.search(
-            r"\b(aim|hope|intend|plan|seek|aspire|wish|would like|future research|interested in|seeking to)\b",
+            r"\b(aim|hope|intend|plan|seek|aspire|wish|would like|future research|interested in)\b",
             line, re.I))
         statement = line
         if future and not ApplicantTruth._aspiration_wording(line):

@@ -61,6 +61,8 @@ def test_fact_inference_and_aspiration_rules(truth):
     with pytest.raises(ValueError, match="future aim"):
         truth.review_claim(false_aspiration, True, "Applicant")
     assert truth._aspiration_wording("I seek to investigate reliable agent evaluation.")
+    assert truth._aspiration_wording("My objective is to investigate reliable agent evaluation.")
+    assert not truth._aspiration_wording("My objective was to investigate reliable agent evaluation.")
     assert not truth._aspiration_wording("I developed AI planning systems.")
 
 
