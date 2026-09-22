@@ -224,7 +224,7 @@ class Ledger:
             if cursor.rowcount != 1:
                 raise ValueError("Application does not exist")
 
-    def list_applications(self) -> list[dict]:
+    def list_applications(self, *, include_archived: bool = False) -> list[dict]:
         sql = """SELECT a.*, COALESCE(p.university, o.institution) AS institution,
             COALESCE(p.programme_name, o.title) AS application_name,
             p.country, p.country_code, p.qs_rank_display, p.qs_ranking_year, p.qs_match_state,
@@ -233,9 +233,10 @@ class Ledger:
             FROM applications a
             LEFT JOIN opportunities o ON o.id = a.opportunity_id
             LEFT JOIN programmes p ON p.id = COALESCE(a.programme_id, o.programme_id)
+            WHERE (? OR a.archived_at IS NULL)
             ORDER BY nearest_deadline IS NULL, nearest_deadline, a.id"""
         with connect(self.db_path) as db:
-            return [dict(r) for r in db.execute(sql, (date.today().isoformat(),))]
+            return [dict(r) for r in db.execute(sql, (date.today().isoformat(), int(include_archived)))]
 
     def create_deadline(
         self, application_id: int, deadline_type: str, due_at: str,

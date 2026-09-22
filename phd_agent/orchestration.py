@@ -352,7 +352,11 @@ class ProgrammeOrchestrator:
         return candidates
 
     def discover_official_web(self, intent_id: int, *, api_key: str = "",
-                              provider: OfficialSearchProvider | None = None) -> dict:
+                              provider: OfficialSearchProvider | None = None,
+                              saved_hits: list | None = None,
+                              on_hits=None, before_hit=None, after_hit=None,
+                              start_index: int = 0, max_hits: int = 12,
+                              query_hint: str = "") -> dict:
         """Propose official URLs with web search, then acquire and structure each page locally."""
         intent = self._intent(intent_id)
         retrieval = self.contexts.retrieve(
@@ -360,12 +364,31 @@ class ProgrammeOrchestrator:
             top_k=6, use="exploration", include_proposed=True,
         )
         route = ModelRouter().route("DISCOVERY_PLANNING")
-        search = provider or OpenAIOfficialSearchProvider(api_key)
-        hits = search.search(intent["intent_text"], tuple(item.text for item in retrieval.items), route)
+        search = provider or (OpenAIOfficialSearchProvider(api_key) if saved_hits is None else None)
+        query = intent["intent_text"] + ("\nSearch settings: " + query_hint if query_hint else "")
+        hits = saved_hits if saved_hits is not None else search.search(
+            query, tuple(item.text for item in retrieval.items), route)
+        hits = hits[:max_hits]
+        if on_hits:
+            on_hits(hits, route)
         created = []
         fallbacks = []
-        for hit in hits:
+        for index in range(start_index, len(hits)):
+            hit = hits[index]
+            if before_hit and not before_hit(index, len(hits), hit):
+                break
             if hit.source_kind not in {"PROGRAMME", "ADMISSIONS", "VACANCY", "PROJECT", "FUNDING"}:
+                if after_hit:
+                    after_hit(index + 1, len(hits), hit)
+                continue
+            with connect(self.db_path) as db:
+                existing = db.execute("""SELECT id FROM programme_candidates
+                    WHERE intent_id=? AND canonical_url=? AND review_state!='REJECTED'
+                      AND archived_at IS NULL ORDER BY id DESC LIMIT 1""",
+                    (intent_id, hit.official_url)).fetchone()
+            if existing:
+                if after_hit:
+                    after_hit(index + 1, len(hits), hit)
                 continue
             result = self.analyse_url(hit.official_url, intent["applicant_context_id"], intent_id=intent_id)
             if result["status"] == "CANDIDATE_READY":
@@ -386,9 +409,11 @@ class ProgrammeOrchestrator:
             else:
                 fallbacks.append({"url": hit.official_url, "reason": result.get("reason"),
                                   "ingestion_id": result.get("ingestion_id")})
+            if after_hit:
+                after_hit(index + 1, len(hits), hit)
         self.contexts.record_workload("OFFICIAL_URLS_DISCOVERED", len(hits),
                                       entity_type="DISCOVERY_INTENT", entity_id=intent_id,
-                                      metadata={"provider": search.provider, "model": route.model})
+                                      metadata={"provider": search.provider if search else "checkpoint", "model": route.model})
         return {"route": route, "hits": len(hits), "candidates": created, "human_fallbacks": fallbacks}
 
     def _http_get(self, url: str) -> Acquisition:
@@ -758,8 +783,9 @@ class ProgrammeOrchestrator:
 
     def list_candidates(self, *, intent_id: int | None = None,
                         states: tuple[str, ...] = ("NEW", "SHORTLISTED"),
-                        extra_filters: dict | None = None) -> list[dict]:
-        clauses, args = [], []
+                        extra_filters: dict | None = None,
+                        include_archived: bool = False) -> list[dict]:
+        clauses, args = ([] if include_archived else ["archived_at IS NULL"]), []
         if intent_id is not None:
             clauses.append("intent_id=?")
             args.append(intent_id)
@@ -1003,7 +1029,10 @@ class ProgrammeOrchestrator:
         return sorted(cards, key=lambda card: (-card["research_fit"], card["name"]))
 
     def discover_faculty_official_web(self, application_id: int, context_id: int, *, api_key: str = "",
-                                      provider: OfficialSearchProvider | None = None) -> dict:
+                                      provider: OfficialSearchProvider | None = None,
+                                      saved_hits: list | None = None,
+                                      on_hits=None, before_hit=None, after_hit=None,
+                                      start_index: int = 0, max_hits: int = 12) -> dict:
         """Queue faculty candidates from acquired official pages; verification remains an operator decision."""
         with connect(self.db_path) as db:
             app = db.execute("SELECT * FROM applications WHERE id=?", (application_id,)).fetchone()
@@ -1022,19 +1051,32 @@ class ProgrammeOrchestrator:
         retrieval = self.contexts.retrieve(context_id, "FACULTY_SYNTHESIS", query,
                                            top_k=6, use="exploration", include_proposed=True)
         route = ModelRouter().route("FACULTY_SYNTHESIS")
-        search = provider or OpenAIOfficialSearchProvider(api_key)
-        hits = search.search(query, tuple(item.text for item in retrieval.items), route, purpose="FACULTY")
+        search = provider or (OpenAIOfficialSearchProvider(api_key) if saved_hits is None else None)
+        hits = saved_hits if saved_hits is not None else search.search(
+            query, tuple(item.text for item in retrieval.items), route, purpose="FACULTY")
+        hits = hits[:max_hits]
+        if on_hits:
+            on_hits(hits, route)
         discovery = Discovery(self.db_path)
         queued = []
         fallbacks = []
-        for hit in hits:
+        for index in range(start_index, len(hits)):
+            hit = hits[index]
+            if before_hit and not before_hit(index, len(hits), hit):
+                break
             if hit.source_kind not in {"FACULTY", "LAB"} or not hit.person_name:
+                if after_hit:
+                    after_hit(index + 1, len(hits), hit)
                 continue
             if institution and institution.casefold() not in hit.institution.casefold() and hit.institution.casefold() not in institution.casefold():
+                if after_hit:
+                    after_hit(index + 1, len(hits), hit)
                 continue
             acquisition = self.acquire_page(hit.official_url)
             if acquisition.status != "ACQUIRED" or len(acquisition.text) < MIN_USEFUL_PAGE_TEXT:
                 fallbacks.append({"url": hit.official_url, "reason": acquisition.reason})
+                if after_hit:
+                    after_hit(index + 1, len(hits), hit)
                 continue
             with connect(self.db_path) as db:
                 existing_source = db.execute("""SELECT id FROM source_catalogue
@@ -1066,9 +1108,11 @@ class ProgrammeOrchestrator:
                 "evidence_id": evidence_id, "verification_state": "NEEDS_REVIEW",
                 "provider": route.provider, "model": route.model,
             })
+            if after_hit:
+                after_hit(index + 1, len(hits), hit)
         self.contexts.record_workload("FACULTY_PAGES_INGESTED", len(queued),
                                       entity_type="APPLICATION", entity_id=application_id,
-                                      metadata={"provider": search.provider, "model": route.model})
+                                      metadata={"provider": search.provider if search else "checkpoint", "model": route.model})
         return {"queued": queued, "human_fallbacks": fallbacks, "route": route}
 
     def application_overview(self, application_id: int) -> dict:
