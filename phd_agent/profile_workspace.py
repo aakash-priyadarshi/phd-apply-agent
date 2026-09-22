@@ -550,7 +550,7 @@ class ProfileWorkspace:
             return self._result(context, profile_id, 0, claims, (), path, confirmed=True, operation_id=None)
         operation_id = self._start_operation(context["context"]["owner_name"],
                                              context["context"]["research_track"]["title"])
-        trusted = None
+        confirmed_context = None
         try:
             for claim in claims:
                 if claim["review_status"] != "PENDING":
@@ -588,24 +588,24 @@ class ProfileWorkspace:
                 self.truth.approve_track(track_version_id, self.reviewer)
             if master and master["approval_state"] == "DRAFT":
                 self.studio.review_master_cv(context["master_cv_version_id"], self.reviewer, True)
-            trusted = self.contexts.build(
+            confirmed_context = self.contexts.build(
                 context["profile_version_id"], context["master_cv_version_id"],
                 track_version_id, trust_level="TRUSTED", build_operation_id=operation_id,
                 activate=False)
             documents = self.source_documents()
             summary_path, _ = self._summary(
-                trusted["context"]["owner_name"], trusted["profile_version_id"],
-                trusted["research_track_version_id"], trusted["context"]["research_track"]["title"],
+                context["context"]["owner_name"], context["profile_version_id"],
+                track_version_id, context["context"]["research_track"]["title"],
                 approved, documents)
-            self.contexts.activate(trusted["id"], operation_id)
-            trusted = self.contexts.get(trusted["id"])
+            self.contexts.activate(confirmed_context["id"], operation_id)
+            confirmed_context = self.contexts.get(confirmed_context["id"])
             self._finish_operation(
                 operation_id, "ACTIVE", profile_id=profile_id, trust_level="TRUSTED",
-                exploration_context_id=context["id"], trusted_context_id=trusted["id"])
-            return self._result(trusted, profile_id, 0, approved, (), summary_path,
+                exploration_context_id=context["id"], trusted_context_id=confirmed_context["id"])
+            return self._result(confirmed_context, profile_id, 0, approved, (), summary_path,
                                 confirmed=True, operation_id=operation_id)
         except Exception as error:
-            if trusted and trusted.get("status") == "BUILDING":
-                self.contexts.mark_failed(trusted["id"])
+            if confirmed_context and confirmed_context.get("status") == "BUILDING":
+                self.contexts.mark_failed(confirmed_context["id"])
             self._finish_operation(operation_id, "FAILED", profile_id=profile_id, error_text=str(error))
             raise
