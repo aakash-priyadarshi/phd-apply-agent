@@ -146,9 +146,10 @@ class OperationService:
             if active >= MAX_ACTIVE_OPERATIONS:
                 raise ValueError("Two operations are already active. Stop or finish one before starting another")
             if operation_type in SCAN_TYPES and db.execute(
-                    """SELECT 1 FROM operations WHERE application_id=? AND operation_type=?
+                    """SELECT 1 FROM operations WHERE application_id=?
+                    AND operation_type IN ('APPLICATION_DETAIL_SCAN','APPLICATION_FULL_REFRESH')
                     AND status IN ('QUEUED','RUNNING','CANCEL_REQUESTED','PAUSED')""",
-                    (application_id, operation_type)).fetchone():
+                    (application_id,)).fetchone():
                 raise ValueError("Scan already running")
             operation_id = db.execute("""INSERT INTO operations
                 (operation_type,title,status,search_id,application_id,context_id,created_at,updated_at)

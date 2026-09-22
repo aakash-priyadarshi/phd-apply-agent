@@ -413,7 +413,7 @@ class ApplicationRescan:
             raise ValueError("Nothing missing to scan")
         from phd_agent.operations import OperationService
         operation_type = SCAN_FULL if mode == "FULL" else SCAN_MISSING
-        if self.active_operation(application_id, operation_type):
+        if self.active_operation(application_id):
             raise ValueError("Scan already running")
         operation_id = OperationService(self.db_path).queue(operation_type, application_id=application_id)
         checkpoint = {"mode": mode, "targets": targets, "fields": list(fields or []), "page_budget": int(max_pages),

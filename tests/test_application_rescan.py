@@ -130,7 +130,8 @@ def test_duplicate_running_scan_is_rejected(tmp_path):
     scanner.queue(app_id, fields=["application_fee"])
     with pytest.raises(ValueError, match="Scan already running"):
         scanner.queue(app_id, fields=["application_fee"])
-    assert scanner.queue(app_id, mode="FULL", fields=["deadline"])
+    with pytest.raises(ValueError, match="Scan already running"):
+        scanner.queue(app_id, mode="FULL", fields=["deadline"])
 
 
 def test_unknown_fee_becomes_extracted_with_evidence_and_confirmed_deadline_stays(tmp_path):
