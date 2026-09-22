@@ -16,6 +16,7 @@ from phd_agent.university_enrichment import COUNTRY_NAMES
 
 MAX_ACTIVE_OPERATIONS = 2
 MAX_SEARCH_PAGES = 12
+SCAN_TYPES = {"APPLICATION_DETAIL_SCAN", "APPLICATION_FULL_REFRESH"}
 
 
 def _query_hint(criteria: dict) -> str:
@@ -109,7 +110,7 @@ class OperationService:
 
     def queue(self, operation_type: str, *, search_id: int | None = None,
               application_id: int | None = None, context_id: int | None = None) -> int:
-        if operation_type not in {"PROGRAMME_SEARCH", "FACULTY_DISCOVERY"}:
+        if operation_type not in {"PROGRAMME_SEARCH", "FACULTY_DISCOVERY", *SCAN_TYPES}:
             raise ValueError("Unsupported background operation")
         if operation_type == "PROGRAMME_SEARCH":
             search = self.get_search(search_id)
@@ -117,6 +118,19 @@ class OperationService:
             context_id = search["context_id"]
             if search["status"] != "ACTIVE":
                 raise ValueError("Restore the search before running it")
+        elif operation_type in SCAN_TYPES:
+            if not application_id:
+                raise ValueError("Choose an application")
+            with connect(self.db_path) as db:
+                app = db.execute("""SELECT COALESCE(p.university,o.institution) AS institution
+                    FROM applications a
+                    LEFT JOIN programmes p ON p.id=a.programme_id
+                    LEFT JOIN opportunities o ON o.id=a.opportunity_id
+                    WHERE a.id=? AND a.archived_at IS NULL""", (application_id,)).fetchone()
+            if not app:
+                raise ValueError("Application is unavailable")
+            title = ("Full refresh · " if operation_type == "APPLICATION_FULL_REFRESH" else "Scan missing details · ") + app["institution"]
+            context_id = None
         else:
             if not application_id or not context_id:
                 raise ValueError("Choose an application and applicant profile")
@@ -131,6 +145,12 @@ class OperationService:
             active = db.execute("SELECT COUNT(*) FROM operations WHERE status IN ('QUEUED','RUNNING','CANCEL_REQUESTED')").fetchone()[0]
             if active >= MAX_ACTIVE_OPERATIONS:
                 raise ValueError("Two operations are already active. Stop or finish one before starting another")
+            if operation_type in SCAN_TYPES and db.execute(
+                    """SELECT 1 FROM operations WHERE application_id=?
+                    AND operation_type IN ('APPLICATION_DETAIL_SCAN','APPLICATION_FULL_REFRESH')
+                    AND status IN ('QUEUED','RUNNING','CANCEL_REQUESTED','PAUSED')""",
+                    (application_id,)).fetchone():
+                raise ValueError("Scan already running")
             operation_id = db.execute("""INSERT INTO operations
                 (operation_type,title,status,search_id,application_id,context_id,created_at,updated_at)
                 VALUES(?,?,'QUEUED',?,?,?,?,?)""",
@@ -163,9 +183,22 @@ class OperationService:
         result["checkpoint"] = json.loads(result.pop("checkpoint_json"))
         return result
 
-    def list(self, limit: int = 30) -> list[dict]:
+    def list(self, limit: int = 30, *, search_id: int | None = None, application_id: int | None = None,
+             operation_types: tuple[str, ...] | None = None) -> list[dict]:
+        clauses, values = [], []
+        if search_id is not None:
+            clauses.append("search_id=?")
+            values.append(search_id)
+        if application_id is not None:
+            clauses.append("application_id=?")
+            values.append(application_id)
+        if operation_types:
+            clauses.append("operation_type IN (" + ",".join("?" for _ in operation_types) + ")")
+            values.extend(operation_types)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         with connect(self.db_path) as db:
-            ids = [r[0] for r in db.execute("SELECT id FROM operations ORDER BY id DESC LIMIT ?", (limit,))]
+            ids = [r[0] for r in db.execute(
+                f"SELECT id FROM operations{where} ORDER BY id DESC LIMIT ?", (*values, limit))]
         return [self.get(item) for item in ids]
 
     def events(self, operation_id: int) -> list[dict]:
@@ -175,18 +208,23 @@ class OperationService:
 
     def stop(self, operation_id: int) -> None:
         with transaction(self.db_path) as db:
-            row = db.execute("SELECT status FROM operations WHERE id=?", (operation_id,)).fetchone()
+            row = db.execute("SELECT status,operation_type,application_id FROM operations WHERE id=?", (operation_id,)).fetchone()
             if not row or row["status"] not in {"QUEUED", "RUNNING"}:
                 raise ValueError("Only queued or running operations can be stopped")
             status = "CANCELLED" if row["status"] == "QUEUED" else "CANCEL_REQUESTED"
             db.execute("UPDATE operations SET status=?,cancellation_at=?,updated_at=?,finished_at=? WHERE id=?",
                        (status, utc_now(), utc_now(), utc_now() if status == "CANCELLED" else None, operation_id))
             self._event(db, operation_id, "Stop requested by applicant")
+            if row["operation_type"] in SCAN_TYPES and row["application_id"]:
+                action = "SCAN_STOPPED" if status == "CANCELLED" else "SCAN_STOP_REQUESTED"
+                db.execute("""INSERT INTO record_change_events(entity_type,entity_id,action,changes_json,created_at)
+                    VALUES('APPLICATION',?,?,?,?)""",
+                    (row["application_id"], action, json.dumps({"operation_id": operation_id}), utc_now()))
 
     def resume(self, operation_id: int, *, retry: bool = False) -> None:
         with transaction(self.db_path) as db:
-            row = db.execute("SELECT status FROM operations WHERE id=?", (operation_id,)).fetchone()
-            if not row or row["status"] not in {"CANCELLED", "INTERRUPTED", "FAILED"}:
+            row = db.execute("SELECT status,operation_type,application_id FROM operations WHERE id=?", (operation_id,)).fetchone()
+            if not row or row["status"] not in {"CANCELLED", "INTERRUPTED", "FAILED", "PAUSED"}:
                 raise ValueError("Only stopped, interrupted, or failed operations can resume")
             active = db.execute("SELECT COUNT(*) FROM operations WHERE status IN ('QUEUED','RUNNING','CANCEL_REQUESTED')").fetchone()[0]
             if active >= MAX_ACTIVE_OPERATIONS:
@@ -198,6 +236,10 @@ class OperationService:
                 updated_at=?,finished_at=NULL,cancellation_at=NULL WHERE id=?""",
                 (int(retry), int(retry), int(retry), utc_now(), operation_id))
             self._event(db, operation_id, "Restarted from the beginning" if retry else "Resumed from saved progress")
+            if row["operation_type"] in SCAN_TYPES and row["application_id"]:
+                db.execute("""INSERT INTO record_change_events(entity_type,entity_id,action,changes_json,created_at)
+                    VALUES('APPLICATION',?,'SCAN_QUEUED',?,?)""",
+                    (row["application_id"], json.dumps({"operation_id": operation_id, "retry": retry}), utc_now()))
 
     def recover_interrupted(self) -> int:
         with transaction(self.db_path) as db:
@@ -210,12 +252,20 @@ class OperationService:
 
     def _claim(self, operation_id: int) -> bool:
         with transaction(self.db_path) as db:
-            row = db.execute("SELECT status FROM operations WHERE id=?", (operation_id,)).fetchone()
+            row = db.execute("SELECT status,operation_type,application_id FROM operations WHERE id=?",
+                             (operation_id,)).fetchone()
             if not row or row["status"] != "QUEUED":
                 return False
             db.execute("UPDATE operations SET status='RUNNING',started_at=?,updated_at=?,stage='Preparing' WHERE id=?",
                        (utc_now(), utc_now(), operation_id))
             self._event(db, operation_id, "Started")
+            if row["operation_type"] in SCAN_TYPES and row["application_id"]:
+                resumed = db.execute("""SELECT 1 FROM operation_events WHERE operation_id=? AND event_text IN
+                    ('Resumed from saved progress','Restarted from the beginning')""", (operation_id,)).fetchone()
+                if resumed:
+                    db.execute("""INSERT INTO record_change_events(entity_type,entity_id,action,changes_json,created_at)
+                        VALUES('APPLICATION',?,'SCAN_RESUMED',?,?)""",
+                        (row["application_id"], json.dumps({"operation_id": operation_id}), utc_now()))
         return True
 
     def _progress(self, operation_id: int, *, stage: str, item: str = "", completed: int | None = None,
@@ -240,21 +290,27 @@ class OperationService:
                 self._event(db, operation_id, event)
         return True
 
-    def _finish(self, operation_id: int, status: str, *, error: str | None = None) -> None:
+    def _finish(self, operation_id: int, status: str, *, error: str | None = None, results: int | None = None) -> None:
         with transaction(self.db_path) as db:
-            row = db.execute("SELECT status,search_id,application_id FROM operations WHERE id=?", (operation_id,)).fetchone()
+            row = db.execute("SELECT status,search_id,application_id,operation_type FROM operations WHERE id=?", (operation_id,)).fetchone()
             if not row:
                 return
             if row["status"] == "INTERRUPTED":
                 return
             if row["status"] == "CANCEL_REQUESTED":
                 status = "CANCELLED"
-            results = 0
-            if row["search_id"]:
+                if row["operation_type"] in SCAN_TYPES and row["application_id"]:
+                    db.execute("""INSERT INTO record_change_events(entity_type,entity_id,action,changes_json,created_at)
+                        VALUES('APPLICATION',?,'SCAN_STOPPED',?,?)""",
+                        (row["application_id"], json.dumps({"operation_id": operation_id}), utc_now()))
+            if results is None and row["operation_type"] in SCAN_TYPES:
+                results = db.execute("""SELECT COUNT(*) FROM application_scan_findings
+                    WHERE operation_id=? AND state='EXTRACTED'""", (operation_id,)).fetchone()[0]
+            elif results is None and row["search_id"]:
                 results = db.execute("""SELECT COUNT(*) FROM programme_candidates c
                     JOIN search_sessions s ON s.intent_id=c.intent_id
                     WHERE s.id=? AND c.archived_at IS NULL""", (row["search_id"],)).fetchone()[0]
-            elif row["application_id"]:
+            elif results is None and row["application_id"]:
                 results = db.execute("""SELECT COUNT(*) FROM faculty_candidates fc
                     JOIN source_catalogue sc ON sc.id=fc.source_catalogue_id
                     WHERE fc.review_state='NEW' AND sc.university=(
@@ -262,18 +318,24 @@ class OperationService:
                         LEFT JOIN programmes p ON p.id=a.programme_id
                         LEFT JOIN opportunities o ON o.id=a.opportunity_id WHERE a.id=?)""",
                     (row["application_id"],)).fetchone()[0]
+            results = results or 0
             db.execute("""UPDATE operations SET status=?,stage=?,current_item=NULL,results_found=?,error_summary=?,
                 updated_at=?,finished_at=? WHERE id=?""",
                 (status, status.title(), results, error, utc_now(), utc_now(), operation_id))
-            self._event(db, operation_id, f"{status.title()}: {results} results saved")
+            label = "fields resolved" if row["operation_type"] in SCAN_TYPES else "results saved"
+            self._event(db, operation_id, f"{status.title()}: {results} {label}")
 
-    def run(self, operation_id: int, *, provider=None, api_key: str | None = None) -> None:
+    def run(self, operation_id: int, *, provider=None, api_key: str | None = None, fetcher=None) -> None:
         if not self._claim(operation_id):
             return
         operation = self.get(operation_id)
         key = os.getenv("OPENAI_API_KEY", "").strip() if api_key is None else api_key
         checkpoint = operation["checkpoint"]
         try:
+            if operation["operation_type"] in SCAN_TYPES:
+                from phd_agent.application_rescan import ApplicationRescan
+                ApplicationRescan(self.db_path).execute(operation_id, self, fetcher=fetcher)
+                return
             orchestrator = ProgrammeOrchestrator(self.db_path)
             if operation["operation_type"] == "PROGRAMME_SEARCH":
                 search = self.get_search(operation["search_id"])

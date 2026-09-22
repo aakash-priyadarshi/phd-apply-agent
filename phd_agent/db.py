@@ -273,6 +273,7 @@ from phd_agent.migrations.slice6 import SCHEMA as SLICE_6_SCHEMA
 from phd_agent.migrations.slice7 import SCHEMA as SLICE_7_SCHEMA
 from phd_agent.migrations.slice8 import SCHEMA as SLICE_8_SCHEMA
 from phd_agent.migrations.slice9 import SCHEMA as SLICE_9_SCHEMA
+from phd_agent.migrations.slice10 import SCHEMA as SLICE_10_SCHEMA
 
 
 MIGRATIONS = (
@@ -287,6 +288,7 @@ MIGRATIONS = (
     (9, "profile_confirmation_and_university_enrichment", SLICE_7_SCHEMA),
     (10, "persistent_search_operations_and_record_controls", SLICE_8_SCHEMA),
     (11, "applicant_calendar_events", SLICE_9_SCHEMA),
+    (12, "application_detail_scan", SLICE_10_SCHEMA),
 )
 
 

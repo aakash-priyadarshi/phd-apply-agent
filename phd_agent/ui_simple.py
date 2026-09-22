@@ -10,6 +10,7 @@ from pathlib import Path
 import streamlit as st
 
 from phd_agent.applicant_context import ApplicantResearchContextService
+from phd_agent.application_rescan import FIELDS, HUMAN_MESSAGE, SCAN_FULL, SCAN_MISSING, ApplicationRescan
 from phd_agent.browser_worker import FormPlanService, companion_command, fields_from_html
 from phd_agent.config import load_settings
 from phd_agent.db import connect
@@ -253,11 +254,10 @@ def _create_intent(path: Path, context: dict, *, key: str) -> None:
 
 
 @st.fragment(run_every="2s")
-def _operation_live(path: Path, *, search_id: int | None = None, application_id: int | None = None) -> None:
+def _operation_live(path: Path, *, search_id: int | None = None, application_id: int | None = None,
+                    operation_types: tuple[str, ...] | None = None) -> None:
     service = OperationService(path)
-    operations = [item for item in service.list() if
-                  (search_id is None or item["search_id"] == search_id) and
-                  (application_id is None or item["application_id"] == application_id)]
+    operations = service.list(search_id=search_id, application_id=application_id, operation_types=operation_types)
     for item in operations[:5]:
         with st.container(border=True):
             st.write(f"**{item['title']}** · {item['status'].replace('_', ' ').title()}")
@@ -273,13 +273,36 @@ def _operation_live(path: Path, *, search_id: int | None = None, application_id:
                 if st.button("Stop", key=f"simple_stop_{item['id']}"):
                     _run(lambda: service.stop(item["id"]), "Stop requested. The current page may finish first.")
                     st.rerun(scope="fragment")
-            elif item["status"] in {"CANCELLED", "INTERRUPTED", "FAILED"}:
+            elif item["status"] in {"CANCELLED", "INTERRUPTED", "FAILED", "PAUSED"}:
                 left, right = st.columns(2)
                 if left.button("Resume", key=f"simple_resume_{item['id']}"):
                     if _run(lambda: (service.resume(item["id"]), service.launch(item["id"]))):
                         st.rerun(scope="fragment")
                 if right.button("Retry", key=f"simple_retry_{item['id']}"):
                     if _run(lambda: (service.resume(item["id"], retry=True), service.launch(item["id"]))):
+                        st.rerun(scope="fragment")
+            if item["operation_type"] in {SCAN_MISSING, SCAN_FULL} and item["status"] == "PAUSED":
+                st.warning(HUMAN_MESSAGE)
+                pending = [url for url in item["checkpoint"].get("human_input") or [] if url not in item["checkpoint"].get("supplied", {})]
+                page_url = pending[-1] if pending else ""
+                if page_url.startswith("http"):
+                    st.link_button("Open page", page_url)
+                with st.form(f"scan_supply_{item['id']}"):
+                    pasted = st.text_area("Paste page text")
+                    upload = st.file_uploader("Upload saved HTML or PDF", type=["html", "htm", "pdf"])
+                    supplied = st.form_submit_button("Use this page")
+                if supplied and page_url:
+                    def use_page(item=item, pasted=pasted, upload=upload, page_url=page_url):
+                        scanner = ApplicationRescan(path)
+                        if upload is not None:
+                            name = (upload.name or "").casefold()
+                            method = "UPLOADED_PDF" if name.endswith(".pdf") else "UPLOADED_HTML"
+                            scanner.supply(item["id"], page_url, upload.getvalue(), method=method)
+                        else:
+                            scanner.supply(item["id"], page_url, pasted)
+                        service.resume(item["id"])
+                        service.launch(item["id"])
+                    if _run(use_page, "Page added. Scan resumed."):
                         st.rerun(scope="fragment")
             with st.expander("Activity"):
                 for event in service.events(item["id"])[-12:]:
@@ -356,6 +379,12 @@ def _home(path: Path, context: dict) -> None:
       <h2>Welcome back, {html.escape(owner)}</h2><div class="muted">Here is what needs attention today.</div></div>""",
       unsafe_allow_html=True)
     _profile_banner(path, context)
+    scanner = ApplicationRescan(path)
+    notes = scanner.notifications()[:3]
+    for note in notes:
+        st.info(note["message"])
+    if notes:
+        scanner.mark_notifications_read([note["id"] for note in notes])
     summary = (("Deadlines · 14 days", "deadlines_14_days"), ("Professor replies", "new_replies"),
                ("Programme results", "programme_results"), ("Missing documents", "missing_required"))
     for column, (label, key) in zip(st.columns(4), summary):
@@ -378,6 +407,13 @@ def _home(path: Path, context: dict) -> None:
                     else:
                         st.session_state[key] = value
                 st.rerun()
+            if item.get("scan_application_id") and st.button("Scan now", key=f"today_scan_{index}"):
+                def start_scan(application_id=item["scan_application_id"]):
+                    operation_id = ApplicationRescan(path).queue(application_id)
+                    OperationService(path).launch(operation_id)
+                if _run(start_scan, "Scan started"):
+                    st.session_state.simple_nav_target = "Operations"
+                    st.rerun()
             if item.get("task_id") and st.button("Mark task done", key=f"today_complete_{item['task_id']}"):
                 if _run(lambda item=item: planner.complete_task(item["task_id"]), "Task completed"):
                     st.rerun()
@@ -502,6 +538,7 @@ def _applications(path: Path, context: dict) -> None:
     applications = ledger.list_applications()
     st.title("Applications")
     st.caption("One place for deadlines, missing items and the next action.")
+    _operation_live(path, operation_types=(SCAN_MISSING, SCAN_FULL))
     if not applications:
         st.info("Add a programme from Find programmes and it will appear here.")
     application_map = {item["id"]: item for item in applications}
@@ -532,6 +569,46 @@ def _applications(path: Path, context: dict) -> None:
             counts[0].metric("Ready", f"{readiness['required_complete']}/{readiness['required_total']}")
             counts[1].metric("Need checking", readiness["unknown_requirements"])
             counts[2].metric("Open tasks", len(overview["open_tasks"]))
+            scan_summary = ApplicationRescan(path).completeness(application["id"])
+            st.caption(f"Application data {scan_summary['known']}/{scan_summary['total']} known · "
+                       f"Requirements {scan_summary['requirements_known']}/{scan_summary['requirements_total']} resolved")
+            if scan_summary["missing"]:
+                st.write(f"Missing details: {len(scan_summary['missing'])}")
+                for group, items in scan_summary["groups"].items():
+                    st.caption(f"{group}: " + ", ".join(item["label"] for item in items))
+                scan_col, edit_col = st.columns(2)
+                if scan_col.button("Scan missing details", key=f"scan_missing_{application['id']}"):
+                    def start_missing(application_id=application["id"]):
+                        operation_id = ApplicationRescan(path).queue(application_id)
+                        OperationService(path).launch(operation_id)
+                    if _run(start_missing, "Scan started"):
+                        st.rerun()
+                if edit_col.button("Edit manually", key=f"edit_manual_{application['id']}"):
+                    st.session_state[f"manual_edit_{application['id']}"] = True
+                    st.rerun()
+            report = ApplicationRescan(path).latest_report(application["id"])
+            if report and report["summary"]:
+                summary = report["summary"]
+                st.caption(f"Last scan: {len(summary.get('resolved', []))} resolved · "
+                           f"{len(summary.get('conflicts', []))} conflicts · "
+                           f"{len(summary.get('still_unknown', []))} still unknown · "
+                           f"{summary.get('sources_checked', 0)} sources checked")
+            for conflict in ApplicationRescan(path).conflicts(application["id"]):
+                st.warning(f"Possible change detected · {FIELDS[conflict['field_name']]['label']}")
+                st.caption(f"Current: {conflict['old_value'] or 'Unknown'} · Source now says: {conflict['new_value']}")
+                accept, keep, unresolved = st.columns(3)
+                if accept.button("Accept new", key=f"accept_conflict_{conflict['id']}"):
+                    if _run(lambda conflict=conflict: ApplicationRescan(path).resolve_conflict(conflict["id"], "accept"),
+                            "New value accepted"):
+                        st.rerun()
+                if keep.button("Keep current", key=f"keep_conflict_{conflict['id']}"):
+                    if _run(lambda conflict=conflict: ApplicationRescan(path).resolve_conflict(conflict["id"], "keep"),
+                            "Current value kept"):
+                        st.rerun()
+                if unresolved.button("Mark unresolved", key=f"unresolved_conflict_{conflict['id']}"):
+                    if _run(lambda conflict=conflict: ApplicationRescan(path).resolve_conflict(conflict["id"], "unresolved"),
+                            "Left unresolved"):
+                        st.rerun()
             st.write("**Next:**", overview["next_action"])
             if st.button("Prepare this application", key=f"simple_prepare_{application['id']}", type="primary"):
                 if context.get("trust_level") != "TRUSTED":
@@ -544,7 +621,21 @@ def _applications(path: Path, context: dict) -> None:
             prepared = st.session_state.get(f"simple_prepared_{application['id']}")
             if prepared and prepared["blocking"]:
                 st.warning("Still needed: " + " · ".join(prepared["blocking"]))
-            with st.expander("Edit details and fill gaps"):
+            with st.expander("More actions"):
+                if st.button("Full refresh from official sources", key=f"full_refresh_{application['id']}"):
+                    def start_refresh(application_id=application["id"]):
+                        operation_id = ApplicationRescan(path).queue(application_id, mode="FULL")
+                        OperationService(path).launch(operation_id)
+                    if _run(start_refresh, "Full refresh started"):
+                        st.rerun()
+                past = ApplicationRescan(path).history(application["id"])
+                if past:
+                    st.caption("Application scans")
+                    for item in past[:5]:
+                        resolved = len(item["summary"].get("resolved", []))
+                        conflicts = len(item["summary"].get("conflicts", []))
+                        st.caption(f"{item['created_at'][:10]} · {resolved} fields resolved · {conflicts} conflicts")
+            with st.expander("Edit manually", expanded=bool(st.session_state.get(f"manual_edit_{application['id']}"))):
                 with st.form(f"edit_app_{application['id']}"):
                     cycle = st.text_input("Application cycle", value=application["cycle"] or "")
                     status = st.selectbox("Status", APPLICATION_STATUSES,

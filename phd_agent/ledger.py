@@ -271,13 +271,13 @@ class Ledger:
                 WHERE d.application_id = ? ORDER BY d.due_at""", (application_id,)
             )]
 
-    def update_deadline(self, deadline_id: int, **changes) -> None:
+    def update_deadline(self, deadline_id: int, *, db=None, **changes) -> None:
         if "due_at" in changes:
             changes["due_at"] = _date_or_datetime(changes["due_at"], "Deadline")
         self._update("deadlines", deadline_id, changes, {
             "deadline_type", "due_at", "timezone", "source_evidence_id",
             "verification_state", "last_checked_at", "notes",
-        })
+        }, db=db)
 
     def create_requirement(
         self, application_id: int, context: str, requirement_state: str,

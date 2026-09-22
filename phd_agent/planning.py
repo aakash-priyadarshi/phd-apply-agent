@@ -249,6 +249,23 @@ class DailyPlanner:
         if candidates:
             actions.append({"priority": "LATER", "title": f"Review {candidates} programme results",
                             "detail": "New and saved candidates", "page": "Find programmes", "due": None})
+        from phd_agent.application_rescan import ApplicationRescan
+        scanner = ApplicationRescan(self.db_path)
+        with connect(self.db_path) as db:
+            active_apps = db.execute("""SELECT a.id, COALESCE(p.university,o.institution) AS institution
+                FROM applications a
+                LEFT JOIN programmes p ON p.id=a.programme_id
+                LEFT JOIN opportunities o ON o.id=a.opportunity_id
+                WHERE a.archived_at IS NULL ORDER BY a.id""").fetchall()
+        for app in active_apps:
+            summary = scanner.completeness(app["id"])
+            if not summary["missing"] or scanner.active_operation(app["id"]):
+                continue
+            actions.append({"priority": "NEXT",
+                            "title": f"{app['institution']} · {len(summary['missing'])} application details are still missing",
+                            "detail": ", ".join(item["label"] for item in summary["missing"][:5]),
+                            "application_id": app["id"], "page": "Applications",
+                            "scan_application_id": app["id"], "due": None})
         actions.sort(key=lambda item: (PRIORITY_ORDER[item["priority"]], item["due"] or "9999", item["title"]))
         return {"counts": {"deadlines_14_days": len(upcoming_14), "new_replies": len(replies),
                            "programme_results": candidates, "missing_required": len(daily["missing_required"]),
