@@ -221,6 +221,21 @@ def test_retry_processes_pending_claims_after_an_earlier_partial_import(tmp_path
     assert any("unclear aspiration" in warning for warning in retried.warnings)
 
 
+def test_confirmation_requires_an_approved_fact(tmp_path):
+    database = tmp_path / "phd_outreach.db"
+    workspace = ProfileWorkspace(database)
+    extracted = workspace.build(
+        "Aakash Example", "Reliable AI agents",
+        [ProfileUpload("aims.txt", b"""Aakash Example
+I aim to research reliable agentic AI systems for long-horizon evaluation.
+I hope to develop methods that detect reward hacking in autonomous agents.
+""")],
+    )
+    with pytest.raises(ValueError, match="at least one extracted fact"):
+        workspace.confirm(extracted.profile_id)
+    assert ApplicantResearchContextService(database).latest()["trust_level"] == "EXPLORATION"
+
+
 def test_use_this_profile_promotes_extracted_facts_for_outreach(tmp_path):
     database = tmp_path / "phd_outreach.db"
     workspace = ProfileWorkspace(database)

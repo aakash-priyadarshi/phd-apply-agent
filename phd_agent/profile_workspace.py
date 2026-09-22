@@ -570,7 +570,7 @@ class ProfileWorkspace:
                     )
             approved = [claim for claim in self._usable_claims(profile_id)
                         if claim["review_status"] == "APPROVED"]
-            if not approved:
+            if not any(claim["classification"] == "FACT" for claim in approved):
                 raise ValueError("Confirm at least one extracted fact before using this profile")
             profile_version_id = context["profile_version_id"]
             with connect(self.db_path) as db:
