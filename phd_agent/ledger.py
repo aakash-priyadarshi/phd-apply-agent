@@ -115,7 +115,13 @@ class Ledger:
             return [dict(r) for r in db.execute("SELECT * FROM source_evidence ORDER BY id DESC")]
 
     def create_programme(self, university: str, programme_name: str, **details) -> int:
-        allowed = {"department", "degree_type", "cycle", "programme_url", "admissions_url", "portal_url", "notes"}
+        allowed = {
+            "department", "degree_type", "cycle", "programme_url", "admissions_url", "portal_url", "notes",
+            "country", "country_code", "country_source", "country_match_state",
+            "qs_ranking_system", "qs_ranking_year", "qs_rank_display", "qs_rank_numeric",
+            "qs_rank_band_low", "qs_rank_band_high", "qs_source_url", "qs_source_evidence_id",
+            "qs_checked_at", "qs_match_state",
+        }
         if set(details) - allowed:
             raise ValueError("Unsupported programme field")
         now = utc_now()
@@ -129,6 +135,10 @@ class Ledger:
         self._update("programmes", programme_id, changes, {
             "university", "programme_name", "department", "degree_type", "cycle",
             "programme_url", "admissions_url", "portal_url", "notes",
+            "country", "country_code", "country_source", "country_match_state",
+            "qs_ranking_system", "qs_ranking_year", "qs_rank_display", "qs_rank_numeric",
+            "qs_rank_band_low", "qs_rank_band_high", "qs_source_url", "qs_source_evidence_id",
+            "qs_checked_at", "qs_match_state",
         })
 
     def list_programmes(self) -> list[dict]:
@@ -217,11 +227,12 @@ class Ledger:
     def list_applications(self) -> list[dict]:
         sql = """SELECT a.*, COALESCE(p.university, o.institution) AS institution,
             COALESCE(p.programme_name, o.title) AS application_name,
+            p.country, p.country_code, p.qs_rank_display, p.qs_ranking_year, p.qs_match_state,
             (SELECT MIN(d.due_at) FROM deadlines d WHERE d.application_id = a.id
              AND substr(d.due_at, 1, 10) >= ?) AS nearest_deadline
             FROM applications a
-            LEFT JOIN programmes p ON p.id = a.programme_id
             LEFT JOIN opportunities o ON o.id = a.opportunity_id
+            LEFT JOIN programmes p ON p.id = COALESCE(a.programme_id, o.programme_id)
             ORDER BY nearest_deadline IS NULL, nearest_deadline, a.id"""
         with connect(self.db_path) as db:
             return [dict(r) for r in db.execute(sql, (date.today().isoformat(),))]

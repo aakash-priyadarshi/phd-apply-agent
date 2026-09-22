@@ -9,12 +9,15 @@ from pathlib import Path
 import streamlit as st
 
 from phd_agent.applicant_context import ApplicantResearchContextService
+from phd_agent.browser_worker import FormPlanService, companion_command, fields_from_html
+from phd_agent.config import load_settings
 from phd_agent.db import connect
 from phd_agent.discovery import Discovery
 from phd_agent.ledger import Ledger
 from phd_agent.orchestration import ProgrammeOrchestrator
 from phd_agent.outreach import OutreachService
 from phd_agent.profile_workspace import ProfileUpload, ProfileWorkspace
+from phd_agent.university_enrichment import REGION_COUNTRY_CODES, qs_sort_key
 
 
 PAGES = ("Home", "Find programmes", "Applications", "People", "My documents")
@@ -60,13 +63,105 @@ def _run(call, success: str | None = None):
     return True if result is None else result
 
 
+def _qs_caption(payload_or_app: dict) -> str:
+    country = payload_or_app.get("country")
+    flag = {"United States": "🇺🇸", "United Kingdom": "🇬🇧", "Canada": "🇨🇦",
+            "Switzerland": "🇨🇭", "Australia": "🇦🇺", "Singapore": "🇸🇬"}.get(country or "", "")
+    country_bit = " ".join(part for part in (flag, country) if part)
+    display = payload_or_app.get("qs_rank_display")
+    year = payload_or_app.get("qs_ranking_year") or 2027
+    state = payload_or_app.get("qs_match_state")
+    if display and state in {"EXACT", "ALIAS_MATCH"}:
+        qs_bit = f"QS World Rank {year}: {display}"
+    elif state == "NOT_RANKED":
+        qs_bit = f"QS {year}: Not ranked"
+    else:
+        qs_bit = f"QS {year}: Unknown"
+    return " · ".join(part for part in (country_bit, qs_bit) if part)
+
+
+def _profile_banner(path: Path, context: dict) -> None:
+    if context.get("trust_level") != "EXPLORATION":
+        return
+    workspace = ProfileWorkspace(path)
+    latest = workspace.latest_summary()
+    counts = {}
+    for item in context["context"].get("items", []):
+        if item.get("kind") == "PROPOSED_DIRECTION":
+            continue
+        heading = item.get("category") or "OTHER"
+        counts[heading] = counts.get(heading, 0) + 1
+    st.warning("Extracted facts are available for search. Confirm this profile before professor emails, SOPs, proposals, or portal answers.")
+    with st.container(border=True):
+        st.markdown("### Review extracted profile")
+        if latest:
+            st.markdown(latest[1])
+        if counts:
+            st.caption(" · ".join(f"{heading.replace('_', ' ').title()} ✓ {count}" for heading, count in counts.items()))
+        if st.button("Use this profile", type="primary", key="confirm_extracted_profile"):
+            result = _run(lambda: workspace.confirm(context["context"]["profile_id"]),
+                          "Profile confirmed. Outreach and application documents can now use these facts.")
+            if result:
+                st.session_state.simple_profile_notice = {
+                    "message": f"Trusted profile is active with {result.facts_in_profile} confirmed facts.",
+                    "warnings": result.warnings,
+                }
+                st.rerun()
+
+
+def _browser_continue(path: Path, application: dict, context: dict) -> None:
+    portal = application.get("portal_url")
+    st.markdown("**Continue application in browser**")
+    if portal:
+        st.link_button("Open application portal", portal)
+    else:
+        st.caption("Add the official application URL to continue in the browser.")
+        return
+    if context.get("trust_level") != "TRUSTED":
+        st.caption("Confirm your profile before the companion can fill reviewed answers.")
+        return
+    if load_settings().hosted:
+        st.caption("Form filling runs on your computer, not on Railway. Open this workspace locally to analyse the portal page.")
+        return
+    html_upload = st.file_uploader("Save the current portal page as HTML", type=["html", "htm"],
+                                   key=f"portal_html_{application['id']}")
+    pasted = st.text_area("Or paste the page HTML", height=120, key=f"portal_paste_{application['id']}")
+    if st.button("Analyse this page", key=f"analyse_portal_{application['id']}"):
+        markup = html_upload.getvalue().decode("utf-8", errors="replace") if html_upload else pasted
+        fields = fields_from_html(markup)
+        if not fields:
+            st.error("No form fields were found in the supplied HTML.")
+        else:
+            plan = _run(lambda: FormPlanService(path).create_plan(
+                application["id"], portal, fields, context_id=context["id"]),
+                "Fill plan created for local review")
+            if plan:
+                st.session_state[f"browser_plan_{application['id']}"] = plan["id"]
+    plan_id = st.session_state.get(f"browser_plan_{application['id']}")
+    if not plan_id:
+        return
+    plan = FormPlanService(path).get(plan_id)
+    cols = st.columns(4)
+    cols[0].metric("Fields", plan["field_count"])
+    cols[1].metric("Safe autofill", plan["safe_count"])
+    cols[2].metric("Review", plan["review_count"])
+    cols[3].metric("Manual", plan["manual_count"])
+    if plan["status"] == "REVIEW_REQUIRED" and st.button("Approve fill plan", key=f"approve_plan_{plan_id}"):
+        if _run(lambda: FormPlanService(path).approve(plan_id, "Local operator"), "Fill plan approved"):
+            st.rerun()
+    if plan["status"] in {"APPROVED", "FILLED"}:
+        command, language = companion_command(plan_id)
+        st.code(command, language=language)
+        st.caption("Run this locally. The companion never submits the form.")
+
+
 def _profile_setup(path: Path) -> None:
     workspace = ProfileWorkspace(path)
     existing = workspace.source_documents()
     st.markdown("""<div class="simple-hero"><div class="eyebrow">Start here</div>
       <h2>Build your applicant profile</h2>
-      <div class="muted">Add your CV and any useful academic documents. The app will organise the facts,
-      create the internal application context, and save a readable Markdown summary in one step.</div></div>""",
+      <div class="muted">Add your CV and any useful academic documents. The app reads them immediately for search,
+      then asks you to confirm one readable profile before emails and applications use those facts.</div></div>""",
       unsafe_allow_html=True)
     if existing:
         st.success(f"Found {len(existing)} document{'s' if len(existing) != 1 else ''} already in your Vault. You can use them without uploading again.")
@@ -92,7 +187,7 @@ def _profile_setup(path: Path) -> None:
                 name, focus, uploads, api_key=os.getenv("OPENAI_API_KEY", "").strip()))
         if result:
             st.session_state.simple_profile_notice = {
-                "message": f"Profile ready. It now uses {result.facts_in_profile} source-backed facts from your documents.",
+                "message": f"I found {result.facts_in_profile} applicant facts. Review the summary, then choose Use this profile before outreach or applications.",
                 "warnings": result.warnings,
             }
             st.rerun()
@@ -114,8 +209,20 @@ def _create_intent(orchestrator: ProgrammeOrchestrator, context: dict, *, key: s
     st.session_state.simple_intent_id = created["id"]
     _run(lambda: orchestrator.discover_from_ledger(created["id"]))
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    discovery = None
     if api_key:
-        _run(lambda: orchestrator.discover_official_web(created["id"], api_key=api_key))
+        discovery = _run(lambda: orchestrator.discover_official_web(created["id"], api_key=api_key))
+    found = 0
+    if isinstance(discovery, dict):
+        found = len(discovery.get("candidates") or [])
+    waiting = orchestrator.list_candidates(states=("NEW", "SHORTLISTED", "ACCEPTED"))
+    found = max(found, len(waiting))
+    st.session_state.simple_nav_target = "Find programmes"
+    st.session_state.simple_discovery_notice = (
+        f"Search finished. {found} programme result{'s' if found != 1 else ''} "
+        "are ready on this page."
+        if found else "Search finished. Review any programme results below, or paste an official URL."
+    )
     st.rerun()
 
 
@@ -126,7 +233,7 @@ def _candidate(orchestrator: ProgrammeOrchestrator, candidate: dict) -> None:
     with st.container(border=True):
         left, right = st.columns([4, 1])
         left.markdown(f"### {html.escape(title)}")
-        left.caption(" · ".join(filter(None, (institution, payload.get("degree"), payload.get("intake")))))
+        left.caption(" · ".join(filter(None, (institution, payload.get("degree"), payload.get("intake"), _qs_caption(payload)))))
         right.markdown(f"**{candidate['review_state'].title()}**")
         facts = st.columns(3)
         facts[0].metric("Deadline", payload.get("deadline") or "Unknown")
@@ -138,11 +245,11 @@ def _candidate(orchestrator: ProgrammeOrchestrator, candidate: dict) -> None:
         if relevant:
             st.write("**Why it matches your profile:**", relevant[0])
         if candidate["review_state"] != "ACCEPTED":
+            st.caption("Adding accepts the university and programme. Deadline and supervisor contact stay unverified.")
             add, save, dismiss = st.columns([1.25, 1, 1])
             if add.button("Add application", key=f"simple_add_{candidate['id']}", type="primary"):
                 confirmed = {key: payload.get(key) for key in (
-                    "university", "programme", "department", "degree", "intake", "deadline",
-                    "supervisor_contact_policy", "application_route", "official_application_url",
+                    "university", "programme", "department", "degree", "intake",
                 ) if payload.get(key) is not None}
                 if _run(lambda: orchestrator.accept_candidate(
                         candidate["id"], "Local operator", cycle=payload.get("intake"),
@@ -169,12 +276,13 @@ def _candidate(orchestrator: ProgrammeOrchestrator, candidate: dict) -> None:
 def _home(path: Path, context: dict) -> None:
     orchestrator = ProgrammeOrchestrator(path)
     applications = Ledger(path).list_applications()
-    waiting = orchestrator.list_candidates(states=("NEW", "SHORTLISTED"))
     owner = context["context"]["owner_name"].split()[0]
     st.markdown(f"""<div class="simple-hero"><div class="eyebrow">Application workspace</div>
       <h2>Welcome back, {html.escape(owner)}</h2><div class="muted">Tell the app what you want to find.
       Your CV and supporting documents are already available as context.</div></div>""", unsafe_allow_html=True)
+    _profile_banner(path, context)
     _create_intent(orchestrator, context, key="simple_home_intent")
+    waiting = orchestrator.list_candidates(states=("NEW", "SHORTLISTED"))
     st.subheader("Your next step")
     if waiting:
         st.info(f"Review {len(waiting)} programme candidate{'s' if len(waiting) != 1 else ''}.")
@@ -192,8 +300,23 @@ def _discover(path: Path, context: dict) -> None:
     orchestrator = ProgrammeOrchestrator(path)
     st.title("Find programmes")
     st.caption("Search from your research goals or paste one official programme page.")
+    notice = st.session_state.pop("simple_discovery_notice", None)
+    if notice:
+        st.success(notice)
     _create_intent(orchestrator, context, key="simple_discover_intent")
     st.divider()
+    filters = st.columns(4)
+    countries = filters[0].multiselect("Countries", ["UK", "US", "Canada", "Switzerland", "Australia", "Singapore", "Europe"])
+    qs_choice = filters[1].selectbox("QS World Rank", ["Any", "Top 25", "Top 50", "Top 100", "Top 150", "Top 200"])
+    funded_only = filters[2].checkbox("Funded only")
+    min_fit = filters[3].slider("Minimum research fit", 0.0, 10.0, 0.0, 0.5)
+    extra = {"funded_only": funded_only or None, "min_research_fit": min_fit or None}
+    if countries:
+        extra["country_codes"] = sorted({code for name in countries
+                                         for code in REGION_COUNTRY_CODES.get(name.upper(), set())})
+    if qs_choice != "Any":
+        extra["qs_max"] = int(qs_choice.split()[-1])
+    extra = {key: value for key, value in extra.items() if value}
     with st.form("simple_url"):
         url = st.text_input("Official programme URL", placeholder="https://university.example/phd-programme")
         analyse = st.form_submit_button("Analyse page")
@@ -202,6 +325,8 @@ def _discover(path: Path, context: dict) -> None:
             intent_id=st.session_state.get("simple_intent_id")))
         if result:
             st.session_state.simple_url_result = result
+            if result.get("status") == "CANDIDATE_READY":
+                st.session_state.simple_discovery_notice = "Programme page analysed. Results are below."
             st.rerun()
     result = st.session_state.get("simple_url_result")
     if result and result.get("status") == "HUMAN_INPUT_REQUIRED":
@@ -214,7 +339,8 @@ def _discover(path: Path, context: dict) -> None:
                 intent_id=st.session_state.get("simple_intent_id"))):
             st.rerun()
     st.subheader("Results")
-    candidates = orchestrator.list_candidates(states=("NEW", "SHORTLISTED", "ACCEPTED"))
+    candidates = orchestrator.list_candidates(states=("NEW", "SHORTLISTED", "ACCEPTED"), extra_filters=extra)
+    candidates = sorted(candidates, key=lambda item: (-float(item["payload"].get("research_fit") or 0), qs_sort_key(item["payload"])))
     if not candidates:
         st.caption("No programme results yet.")
     for candidate in candidates:
@@ -234,20 +360,28 @@ def _applications(path: Path, context: dict) -> None:
         readiness = overview["readiness"]
         with st.container(border=True):
             st.markdown(f"### {html.escape(application['institution'])} · {html.escape(application['application_name'])}")
-            st.caption(f"{application['cycle']} · deadline {application['nearest_deadline'] or 'not confirmed'}")
+            st.caption(" · ".join(filter(None, (
+                application["cycle"],
+                _qs_caption(application),
+                f"deadline {application['nearest_deadline'] or 'not confirmed'}",
+            ))))
             counts = st.columns(3)
             counts[0].metric("Ready", f"{readiness['required_complete']}/{readiness['required_total']}")
             counts[1].metric("Need checking", readiness["unknown_requirements"])
             counts[2].metric("Open tasks", len(overview["open_tasks"]))
             st.write("**Next:**", overview["next_action"])
             if st.button("Prepare this application", key=f"simple_prepare_{application['id']}", type="primary"):
-                prepared = _run(lambda: orchestrator.prepare_application(
-                    application["id"], context_id=context["id"]))
-                if prepared:
-                    st.session_state[f"simple_prepared_{application['id']}"] = prepared
+                if context.get("trust_level") != "TRUSTED":
+                    st.warning("Confirm your profile with Use this profile before preparing application documents.")
+                else:
+                    prepared = _run(lambda: orchestrator.prepare_application(
+                        application["id"], context_id=context["id"]))
+                    if prepared:
+                        st.session_state[f"simple_prepared_{application['id']}"] = prepared
             prepared = st.session_state.get(f"simple_prepared_{application['id']}")
             if prepared and prepared["blocking"]:
                 st.warning("Still needed: " + " · ".join(prepared["blocking"]))
+            _browser_continue(path, application, context)
             with st.expander("Requirements"):
                 for requirement in overview["requirements"]:
                     state = requirement.get("document_state") or requirement["requirement_state"]
@@ -273,6 +407,10 @@ def _people(path: Path, context: dict) -> None:
         if api_key:
             _run(lambda: orchestrator.discover_faculty_official_web(
                 application_id, context["id"], api_key=api_key))
+            refreshed = _run(lambda: orchestrator.professor_cards(application_id, context["id"]))
+            if refreshed is not None:
+                st.session_state[f"simple_people_{application_id}"] = refreshed
+        st.rerun()
     cards = st.session_state.get(f"simple_people_{application_id}", [])
     if not cards:
         st.caption("No reviewed supervisor matches yet. Use Find relevant supervisors to check current records.")
@@ -299,7 +437,9 @@ def _people(path: Path, context: dict) -> None:
                             application_id, faculty_id=card["faculty_id"], evidence_id=evidence), "Supervisor added"):
                         st.rerun()
             elif packages and card["contact_policy_state"] == "PASS":
-                if st.button("Draft email", key=f"simple_email_{card['faculty_id']}", type="primary"):
+                if context.get("trust_level") != "TRUSTED":
+                    st.caption("Confirm your profile before drafting a professor email.")
+                elif st.button("Draft email", key=f"simple_email_{card['faculty_id']}", type="primary"):
                     _run(lambda: OutreachService(path).prepare(
                         card["faculty_id"], application_id, packages[0]["id"],
                         context["profile_version_id"], context["research_track_version_id"]),
@@ -312,7 +452,8 @@ def _documents(path: Path, context: dict) -> None:
     workspace = ProfileWorkspace(path)
     latest = workspace.latest_summary()
     st.title("My documents")
-    st.caption("Add a document once. The app updates your reusable profile and keeps the original in the Vault.")
+    st.caption("Add a document once. Search can use the extracted summary immediately; confirm the profile before using facts in applications.")
+    _profile_banner(path, context)
     if latest:
         summary_path, summary = latest
         with st.expander("Your readable applicant profile", expanded=True):
@@ -367,9 +508,15 @@ def render_workspace(db_path: Path) -> None:
         for warning in notice["warnings"]:
             st.warning(warning)
     st.sidebar.markdown("### PhD Assistant")
-    st.sidebar.markdown('<span class="ready-pill">Profile ready</span>', unsafe_allow_html=True)
+    if context.get("trust_level") == "TRUSTED":
+        st.sidebar.markdown('<span class="ready-pill">Profile confirmed</span>', unsafe_allow_html=True)
+    else:
+        st.sidebar.markdown('<span class="ready-pill">Review profile</span>', unsafe_allow_html=True)
     st.sidebar.caption(track)
-    page = st.sidebar.radio("Navigation", PAGES, label_visibility="collapsed")
+    nav_target = st.session_state.pop("simple_nav_target", None)
+    if nav_target in PAGES:
+        st.session_state.simple_nav = nav_target
+    page = st.sidebar.radio("Navigation", PAGES, key="simple_nav", label_visibility="collapsed")
     if page == "Home":
         _home(db_path, context)
     elif page == "Find programmes":

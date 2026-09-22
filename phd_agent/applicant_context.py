@@ -138,7 +138,11 @@ class ApplicantResearchContextService:
                           selected["research_track_version_id"])
 
     def build(self, profile_version_id: int, master_cv_version_id: int,
-              research_track_version_id: int) -> dict:
+              research_track_version_id: int, *, trust_level: str = "TRUSTED",
+              build_operation_id: int | None = None, activate: bool = True) -> dict:
+        trust_level = trust_level.strip().upper()
+        if trust_level not in {"EXPLORATION", "TRUSTED"}:
+            raise ValueError("trust_level must be EXPLORATION or TRUSTED")
         with connect(self.db_path) as db:
             profile = db.execute("""SELECT v.*,p.owner_name,p.id AS applicant_profile_id
                 FROM profile_versions v JOIN applicant_profiles p ON p.id=v.profile_id
@@ -147,18 +151,25 @@ class ApplicantResearchContextService:
             track = db.execute("""SELECT v.*,t.profile_id,t.title,t.status AS track_status
                 FROM research_track_versions v JOIN research_tracks t ON t.id=v.track_id
                 WHERE v.id=?""", (research_track_version_id,)).fetchone()
-            claims = [dict(row) for row in db.execute("""SELECT cr.*,c.category
+            claim_filter = "cr.review_status!='REJECTED'" if trust_level == "EXPLORATION" else "cr.review_status='APPROVED'"
+            claims = [dict(row) for row in db.execute(f"""SELECT cr.*,c.category
                 FROM profile_version_claims pvc
                 JOIN claim_revisions cr ON cr.id=pvc.claim_revision_id
                 JOIN claims c ON c.id=cr.claim_id
-                WHERE pvc.profile_version_id=? AND cr.review_status='APPROVED'
+                WHERE pvc.profile_version_id=? AND {claim_filter}
                 ORDER BY cr.id""", (profile_version_id,))]
-        if not profile or profile["approval_state"] != "APPROVED":
+        if not profile:
+            raise ValueError("Applicant profile snapshot not found")
+        if trust_level == "TRUSTED" and profile["approval_state"] != "APPROVED":
             raise ValueError("An approved applicant profile snapshot is required")
-        if not master or master["approval_state"] != "APPROVED" or master["profile_version_id"] != profile_version_id:
+        if not master or master["profile_version_id"] != profile_version_id:
+            raise ValueError("The Master CV must use the selected profile snapshot")
+        if trust_level == "TRUSTED" and master["approval_state"] != "APPROVED":
             raise ValueError("The approved Master CV must use the selected approved profile snapshot")
-        if (not track or track["approval_state"] != "APPROVED" or track["track_status"] != "ACTIVE"
+        if (not track or track["track_status"] != "ACTIVE"
                 or track["profile_id"] != profile["applicant_profile_id"]):
+            raise ValueError("An active research direction for this applicant is required")
+        if trust_level == "TRUSTED" and track["approval_state"] != "APPROVED":
             raise ValueError("An active approved research direction for this applicant is required")
         claim_map = {row["id"]: row for row in claims}
         items: list[dict] = []
@@ -224,10 +235,12 @@ class ApplicantResearchContextService:
             "cv_section": None,
             "claim_revision_ids": json.loads(track["supporting_claim_revision_ids_json"]),
             "source_document_version_ids": [], "source_evidence_ids": [],
-            "approved_for_application": True, "approved_for_outreach": True,
+            "approved_for_application": trust_level == "TRUSTED",
+            "approved_for_outreach": trust_level == "TRUSTED",
         })
         context = {
             "schema_version": 1,
+            "trust_level": trust_level,
             "owner_name": profile["owner_name"],
             "profile_id": profile["applicant_profile_id"],
             "profile_version_id": profile_version_id,
@@ -243,6 +256,8 @@ class ApplicantResearchContextService:
         with connect(self.db_path) as db:
             existing = db.execute("SELECT * FROM applicant_research_contexts WHERE context_sha256=?", (digest,)).fetchone()
         if existing:
+            if activate and existing["status"] != "ACTIVE":
+                self.activate(existing["id"], build_operation_id)
             return self.get(existing["id"])
         basis = {
             "profile_version_id": profile_version_id,
@@ -257,11 +272,13 @@ class ApplicantResearchContextService:
                                  (profile["applicant_profile_id"],)).fetchone()[0]
             context_id = db.execute("""INSERT INTO applicant_research_contexts
                 (profile_id,profile_version_id,master_cv_version_id,research_track_version_id,
-                 version_number,context_sha256,context_json,approval_basis_json,provider,model,prompt_version,created_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                 version_number,context_sha256,context_json,approval_basis_json,provider,model,prompt_version,
+                 created_at,trust_level,status,build_operation_id)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
                 profile["applicant_profile_id"], profile_version_id, master_cv_version_id,
                 research_track_version_id, version, digest, _dump(context), _dump(basis),
                 "deterministic", CONTEXT_VERSION, "none", utc_now(),
+                trust_level, "BUILDING", build_operation_id,
             )).lastrowid
             previous_links = db.execute("""SELECT l.output_type,l.output_id,l.applicant_context_id
                 FROM output_context_links l JOIN applicant_research_contexts c ON c.id=l.applicant_context_id
@@ -273,6 +290,8 @@ class ApplicantResearchContextService:
                     link["output_type"], link["output_id"], link["applicant_context_id"], context_id,
                     "Applicant context changed — review recommended", utc_now(),
                 ))
+        if activate:
+            self.activate(context_id, build_operation_id)
         return self.get(context_id)
 
     def get(self, context_id: int) -> dict:
@@ -285,21 +304,42 @@ class ApplicantResearchContextService:
         result["approval_basis"] = json.loads(result.pop("approval_basis_json"))
         return result
 
-    def latest(self, profile_id: int | None = None) -> dict | None:
-        sql = "SELECT id FROM applicant_research_contexts"
-        args: tuple = ()
+    def latest(self, profile_id: int | None = None, *, trust_level: str | None = None) -> dict | None:
+        sql = "SELECT id FROM applicant_research_contexts WHERE status='ACTIVE'"
+        args: list = []
         if profile_id is not None:
-            sql += " WHERE profile_id=?"
-            args = (profile_id,)
+            sql += " AND profile_id=?"
+            args.append(profile_id)
+        if trust_level is not None:
+            sql += " AND trust_level=?"
+            args.append(trust_level.strip().upper())
         sql += " ORDER BY id DESC LIMIT 1"
         with connect(self.db_path) as db:
             row = db.execute(sql, args).fetchone()
         return self.get(row["id"]) if row else None
 
+    def latest_trusted(self, profile_id: int | None = None) -> dict | None:
+        return self.latest(profile_id, trust_level="TRUSTED")
+
+    def needs_confirmation(self, context: dict | None = None) -> bool:
+        current = context if context is not None else self.latest()
+        return bool(current) and current.get("trust_level") == "EXPLORATION"
+
+    def activate(self, context_id: int, build_operation_id: int | None = None) -> None:
+        with transaction(self.db_path) as db:
+            db.execute("""UPDATE applicant_research_contexts
+                SET status='ACTIVE', build_operation_id=COALESCE(?, build_operation_id)
+                WHERE id=? AND status IN ('BUILDING','FAILED')""", (build_operation_id, context_id))
+
+    def mark_failed(self, context_id: int) -> None:
+        with transaction(self.db_path) as db:
+            db.execute("""UPDATE applicant_research_contexts SET status='FAILED'
+                WHERE id=? AND status='BUILDING'""", (context_id,))
+
     def retrieve(self, context_id: int, task_type: str, query_text: str, *,
                  top_k: int = 3, use: str = "application",
                  include_proposed: bool = True) -> RetrievalResult:
-        if use not in {"application", "outreach"} or top_k < 1 or top_k > 12:
+        if use not in {"application", "outreach", "exploration"} or top_k < 1 or top_k > 12:
             raise ValueError("Invalid retrieval use or result limit")
         query = query_text.strip()
         if not query:
@@ -308,7 +348,7 @@ class ApplicantResearchContextService:
         query_terms = normalized_terms(query)
         scored: list[tuple[float, dict, set[str]]] = []
         for item in context["context"]["items"]:
-            if not item[f"approved_for_{use}"]:
+            if use != "exploration" and not item[f"approved_for_{use}"]:
                 continue
             if not include_proposed and item["classification"] == "PROPOSED":
                 continue

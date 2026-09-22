@@ -89,14 +89,20 @@ class MaterialStudio:
             raise ValueError("Research track references claims outside the approved profile/use")
         return dict(profile), dict(track), claim_map
 
-    def create_master_cv(self, profile_version_id: int, sections: list[dict]) -> int:
+    def create_master_cv(self, profile_version_id: int, sections: list[dict], *,
+                         exploration: bool = False) -> int:
         with connect(self.db_path) as db:
             profile = db.execute("SELECT * FROM profile_versions WHERE id=?", (profile_version_id,)).fetchone()
-            if not profile or profile["approval_state"] != "APPROVED":
+            if not profile:
+                raise ValueError("Profile snapshot not found")
+            if not exploration and profile["approval_state"] != "APPROVED":
                 raise ValueError("Approved profile required")
-            allowed = {r["claim_revision_id"] for r in db.execute("""SELECT pvc.claim_revision_id FROM profile_version_claims pvc
+            allowed_sql = """SELECT pvc.claim_revision_id FROM profile_version_claims pvc
                 JOIN claim_revisions cr ON cr.id=pvc.claim_revision_id WHERE pvc.profile_version_id=?
-                AND cr.review_status='APPROVED' AND cr.approved_for_application=1""", (profile_version_id,))}
+                AND cr.review_status!='REJECTED'"""
+            if not exploration:
+                allowed_sql += " AND cr.review_status='APPROVED' AND cr.approved_for_application=1"
+            allowed = {r["claim_revision_id"] for r in db.execute(allowed_sql, (profile_version_id,))}
         if not sections:
             raise ValueError("Master CV needs sections")
         for section in sections:
@@ -104,7 +110,9 @@ class MaterialStudio:
                 raise ValueError("Invalid or empty CV section")
             for bullet in section["bullets"]:
                 if not bullet.get("text", "").strip() or not set(bullet.get("claim_revision_ids", [])) or not set(bullet["claim_revision_ids"]) <= allowed:
-                    raise ValueError("Each CV bullet requires approved application claims")
+                    raise ValueError(
+                        "Each CV bullet requires source-backed claims"
+                        if exploration else "Each CV bullet requires approved application claims")
         with transaction(self.db_path) as db:
             version = db.execute("SELECT COALESCE(MAX(version_number),0)+1 FROM master_cv_versions WHERE profile_id=?", (profile["profile_id"],)).fetchone()[0]
             return db.execute("""INSERT INTO master_cv_versions

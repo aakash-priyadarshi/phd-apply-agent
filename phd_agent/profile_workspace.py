@@ -39,6 +39,10 @@ class ProfileBuildResult:
     documents_added: int
     facts_in_profile: int
     warnings: tuple[str, ...]
+    confirmed: bool = False
+    trust_level: str = "EXPLORATION"
+    operation_id: int | None = None
+    category_counts: tuple[tuple[str, int], ...] = ()
 
 
 SUPPORTED_SUFFIXES = {".pdf", ".docx", ".txt", ".md"}
@@ -289,7 +293,7 @@ class ProfileWorkspace:
                     JOIN claims c ON c.id=cr.claim_id
                     WHERE cr.extraction_id=? AND cr.review_status='PENDING' AND c.profile_id=?""",
                     (extraction_id, profile_id))]
-        if not pending:
+        if not pending and not existing:
             for item in _deterministic_candidates(text):
                 revision_id = self.truth.create_claim(
                     profile_id, item["category"], item["statement"], item["normalized_claim_type"],
@@ -298,33 +302,30 @@ class ProfileWorkspace:
                     confidence=1.0, notes="Exact source quote: " + item["source_quote"],
                 )
                 pending.append(self.truth._claim_revision(revision_id))
-        approved = []
+        kept = list(existing)
         for claim in pending:
-            notes = (claim["notes"] or "") + "\nIncluded through the simple profile workspace."
-            try:
-                self.truth.review_claim(
-                    claim["id"], True, self.reviewer, verification_state="VERIFIED",
-                    for_application=True, for_outreach=True, notes=notes,
-                )
-            except ValueError as error:
-                if (claim["classification"] != "ASPIRATION"
-                        or "future aim" not in str(error)):
-                    raise
-                self.truth.review_claim(
-                    claim["id"], False, self.reviewer,
-                    notes=notes + "\nSkipped because the extracted wording did not describe a future aim.",
-                )
+            notes = (claim["notes"] or "") + "\nExtracted by the simple profile workspace; awaiting profile confirmation."
+            if (claim["classification"] == "ASPIRATION"
+                    and not ApplicantTruth._aspiration_wording(claim["claim_text"])):
+                try:
+                    self.truth.review_claim(
+                        claim["id"], False, self.reviewer,
+                        notes=notes + "\nSkipped because the extracted wording did not describe a future aim.",
+                    )
+                except ValueError:
+                    continue
                 warnings.append(
                     "Skipped one unclear aspiration while reading "
                     f"{self.vault.get_version(version_id)['original_filename']}.")
                 continue
-            approved.append(claim["id"])
-        return [*existing, *approved], warnings
+            kept.append(claim["id"])
+        return kept, warnings
 
     def _profile_version(self, profile_id: int, claim_ids: list[int]) -> int:
         claim_ids = sorted(set(claim_ids))
         with connect(self.db_path) as db:
-            latest = db.execute("""SELECT id FROM profile_versions WHERE profile_id=? AND approval_state='APPROVED'
+            latest = db.execute("""SELECT id FROM profile_versions WHERE profile_id=?
+                AND approval_state IN ('DRAFT','APPROVED')
                 ORDER BY version_number DESC LIMIT 1""", (profile_id,)).fetchone()
             if latest:
                 current = [row[0] for row in db.execute(
@@ -333,16 +334,16 @@ class ProfileWorkspace:
                 if current == claim_ids:
                     return latest["id"]
         return self.truth.create_profile_version(
-            profile_id, claim_ids, approve=True, reviewer=self.reviewer,
-            notes="Built from uploaded applicant documents in the simple workspace",
+            profile_id, claim_ids, approve=False, reviewer=self.reviewer,
+            notes="Extracted from uploaded applicant documents; awaiting Use this profile",
         )
 
     def _track(self, profile_id: int, research_focus: str, supporting_ids: list[int]) -> int:
         focus = research_focus.strip()
         with connect(self.db_path) as db:
-            existing = db.execute("""SELECT v.id,t.title FROM research_tracks t
+            existing = db.execute("""SELECT v.id,t.title,v.approval_state FROM research_tracks t
                 JOIN research_track_versions v ON v.track_id=t.id
-                WHERE t.profile_id=? AND t.status='ACTIVE' AND v.approval_state='APPROVED'
+                WHERE t.profile_id=? AND t.status='ACTIVE' AND v.approval_state IN ('DRAFT','APPROVED')
                 ORDER BY v.id DESC LIMIT 1""", (profile_id,)).fetchone()
         if existing and (not focus or _normalized(existing["title"]) == _normalized(focus)):
             return existing["id"]
@@ -356,13 +357,12 @@ class ProfileWorkspace:
             expected_contribution=f"A rigorous contribution to {focus.rstrip('.').lower()}.",
             supporting_claim_revision_ids=supporting_ids[:8],
         )
-        self.truth.approve_track(version_id, self.reviewer)
         return version_id
 
     def _master_cv(self, profile_id: int, profile_version_id: int, claims: list[dict]) -> int:
         with connect(self.db_path) as db:
             existing = db.execute("""SELECT id FROM master_cv_versions WHERE profile_id=? AND profile_version_id=?
-                AND approval_state='APPROVED' ORDER BY version_number DESC LIMIT 1""",
+                AND approval_state IN ('DRAFT','APPROVED') ORDER BY version_number DESC LIMIT 1""",
                 (profile_id, profile_version_id)).fetchone()
         if existing:
             return existing["id"]
@@ -373,9 +373,7 @@ class ProfileWorkspace:
                 "text": claim["claim_text"], "claim_revision_ids": [claim["id"]],
             })
         sections = [{"name": section, "bullets": bullets[:12]} for section, bullets in grouped.items() if bullets]
-        master_id = self.studio.create_master_cv(profile_version_id, sections)
-        self.studio.review_master_cv(master_id, self.reviewer, True)
-        return master_id
+        return self.studio.create_master_cv(profile_version_id, sections, exploration=True)
 
     def _summary(self, owner_name: str, profile_version_id: int, research_track_version_id: int,
                  research_focus: str,
@@ -400,8 +398,9 @@ class ProfileWorkspace:
         for document in documents:
             lines.append(f"- **{document['original_filename']}** — {document['document_type'].replace('_', ' ').title()}")
         lines.extend(["", "## How this file is used", "",
-                      "This summary is a readable index of source-backed applicant information. "
-                      "Application documents and professor outreach still retrieve the relevant underlying claims and source files.", ""])
+                      "This summary is a readable index of source-backed extracted information. "
+                      "Programme and professor search can use it immediately. "
+                      "Professor emails, tailored CVs, statements, proposals, and portal answers wait until you choose **Use this profile**.", ""])
         markdown = "\n".join(lines)
         path = self.summary_dir / (
             f"applicant-profile-p{profile_version_id}-t{research_track_version_id}.md")
@@ -414,6 +413,48 @@ class ProfileWorkspace:
         self._approve_document(summary_upload["version_id"],)
         return path, markdown
 
+    def _usable_claims(self, profile_id: int) -> list[dict]:
+        return [claim for claim in self.truth.list_claims(profile_id)
+                if claim["review_status"] in {"PENDING", "APPROVED"}]
+
+    def _category_counts(self, claims: list[dict]) -> tuple[tuple[str, int], ...]:
+        counts: dict[str, int] = {}
+        for claim in claims:
+            heading = SUMMARY_HEADINGS.get(claim["category"], "Additional experience")
+            counts[heading] = counts.get(heading, 0) + 1
+        return tuple(counts.items())
+
+    def _start_operation(self, owner_name: str, research_focus: str) -> int:
+        with transaction(self.db_path) as db:
+            return db.execute("""INSERT INTO profile_build_operations
+                (owner_name,research_focus,status,trust_level,created_at) VALUES(?,?,?,?,?)""",
+                (owner_name, research_focus.strip(), "BUILDING", "EXPLORATION", utc_now())).lastrowid
+
+    def _finish_operation(self, operation_id: int, status: str, *, profile_id: int | None = None,
+                          trust_level: str = "EXPLORATION", exploration_context_id: int | None = None,
+                          trusted_context_id: int | None = None, created_ids: dict | None = None,
+                          error_text: str | None = None) -> None:
+        with transaction(self.db_path) as db:
+            db.execute("""UPDATE profile_build_operations
+                SET profile_id=COALESCE(?,profile_id), status=?, trust_level=?,
+                    exploration_context_id=COALESCE(?,exploration_context_id),
+                    trusted_context_id=COALESCE(?,trusted_context_id),
+                    created_ids_json=?, error_text=?, finished_at=?
+                WHERE id=?""", (
+                profile_id, status, trust_level, exploration_context_id, trusted_context_id,
+                json.dumps(created_ids or {}, sort_keys=True), error_text, utc_now(), operation_id,
+            ))
+
+    def _result(self, context: dict, profile_id: int, added: int, claims: list[dict],
+                warnings: tuple[str, ...], summary_path: Path, *, confirmed: bool,
+                operation_id: int | None) -> ProfileBuildResult:
+        return ProfileBuildResult(
+            context["id"], profile_id, context["profile_version_id"], context["master_cv_version_id"],
+            context["research_track_version_id"], summary_path, added, len(claims), warnings,
+            confirmed, context.get("trust_level") or context["context"].get("trust_level", "EXPLORATION"),
+            operation_id, self._category_counts(claims),
+        )
+
     def build(self, owner_name: str, research_focus: str, uploads: list[ProfileUpload] | None = None,
               *, api_key: str = "") -> ProfileBuildResult:
         owner = owner_name.strip()
@@ -425,56 +466,146 @@ class ProfileWorkspace:
                 continue
             text, _, _ = extract_text(upload.data, upload.name)
             prepared_uploads.append((upload, infer_document_type(upload.name, text)))
-        profile_id = self._profile_id(owner)
-        added = 0
-        warnings: list[str] = []
-        for upload, document_type in prepared_uploads:
-            saved = self.vault.upload(
-                upload.data, upload.name, "SOURCE", document_type,
-                Path(upload.name).stem.replace("_", " ").replace("-", " ").strip().title(),
-                sensitivity="CONFIDENTIAL" if document_type in {"TRANSCRIPT", "MARKSHEET", "DEGREE_CERTIFICATE"} else "NORMAL",
-                notes="Added through the simple profile workspace",
-            )
-            self._approve_document(saved["version_id"])
-            added += int(saved["status"] == "created")
-        documents = self.source_documents()
-        if not documents:
-            raise ValueError("Add at least one CV or supporting document")
-        for document in documents:
-            self._approve_document(document["version_id"])
-            try:
-                data = self.vault.storage.get(document["storage_key"])
-                text, page_count, method = extract_text(data, document["original_filename"])
-            except ValueError as error:
-                warnings.append(str(error))
-                continue
-            extraction_id = self._record_extraction(document["version_id"], text, page_count, method)
-            current_version = self.vault.get_version(document["version_id"])
-            if current_version["approval_state"] != "APPROVED":
-                warnings.append(
-                    f"{document['original_filename']} is stored and parsed but will not supply profile facts "
-                    "until its academic-document review is complete.")
-                continue
-            _, extraction_warnings = self._new_claims(
-                profile_id, document["version_id"], extraction_id, text, api_key=api_key)
-            warnings.extend(extraction_warnings)
-        claims = [claim for claim in self.truth.list_claims(profile_id)
-                  if claim["review_status"] == "APPROVED" and claim["approved_for_application"]]
-        if not claims:
-            raise ValueError("The uploaded documents did not contain enough readable profile information")
-        claim_ids = [claim["id"] for claim in claims]
-        profile_version_id = self._profile_version(profile_id, claim_ids)
-        supporting = [claim["id"] for claim in claims
-                      if claim["classification"] == "FACT" and claim["category"] in {
-                          "RESEARCH_PROJECT", "INDUSTRY_RESEARCH", "SKILL_METHOD", "PUBLICATION", "PATENT"}]
-        supporting = supporting or [claim["id"] for claim in claims if claim["classification"] == "FACT"]
-        track_version_id = self._track(profile_id, research_focus, supporting)
-        master_cv_version_id = self._master_cv(profile_id, profile_version_id, claims)
-        context = self.contexts.build(profile_version_id, master_cv_version_id, track_version_id)
-        focus = context["context"]["research_track"]["title"]
-        summary_path, _ = self._summary(
-            owner, profile_version_id, track_version_id, focus, claims, documents)
-        return ProfileBuildResult(
-            context["id"], profile_id, profile_version_id, master_cv_version_id,
-            track_version_id, summary_path, added, len(claims), tuple(dict.fromkeys(warnings)),
-        )
+        operation_id = self._start_operation(owner, research_focus)
+        created_ids: dict[str, list[int]] = {"profiles": [], "contexts": []}
+        profile_id = None
+        context = None
+        try:
+            profile_id = self._profile_id(owner)
+            created_ids["profiles"].append(profile_id)
+            added = 0
+            warnings: list[str] = []
+            for upload, document_type in prepared_uploads:
+                saved = self.vault.upload(
+                    upload.data, upload.name, "SOURCE", document_type,
+                    Path(upload.name).stem.replace("_", " ").replace("-", " ").strip().title(),
+                    sensitivity="CONFIDENTIAL" if document_type in {"TRANSCRIPT", "MARKSHEET", "DEGREE_CERTIFICATE"} else "NORMAL",
+                    notes="Added through the simple profile workspace",
+                )
+                self._approve_document(saved["version_id"])
+                added += int(saved["status"] == "created")
+            documents = self.source_documents()
+            if not documents:
+                raise ValueError("Add at least one CV or supporting document")
+            for document in documents:
+                self._approve_document(document["version_id"])
+                try:
+                    data = self.vault.storage.get(document["storage_key"])
+                    text, page_count, method = extract_text(data, document["original_filename"])
+                except ValueError as error:
+                    warnings.append(str(error))
+                    continue
+                extraction_id = self._record_extraction(document["version_id"], text, page_count, method)
+                current_version = self.vault.get_version(document["version_id"])
+                if current_version["approval_state"] != "APPROVED":
+                    warnings.append(
+                        f"{document['original_filename']} is stored and parsed but will not supply profile facts "
+                        "until its academic-document review is complete.")
+                    continue
+                _, extraction_warnings = self._new_claims(
+                    profile_id, document["version_id"], extraction_id, text, api_key=api_key)
+                warnings.extend(extraction_warnings)
+            claims = self._usable_claims(profile_id)
+            if not claims:
+                raise ValueError("The uploaded documents did not contain enough readable profile information")
+            claim_ids = [claim["id"] for claim in claims]
+            profile_version_id = self._profile_version(profile_id, claim_ids)
+            supporting = [claim["id"] for claim in claims
+                          if claim["classification"] == "FACT" and claim["category"] in {
+                              "RESEARCH_PROJECT", "INDUSTRY_RESEARCH", "SKILL_METHOD", "PUBLICATION", "PATENT"}]
+            supporting = supporting or [claim["id"] for claim in claims if claim["classification"] == "FACT"]
+            track_version_id = self._track(profile_id, research_focus, supporting)
+            master_cv_version_id = self._master_cv(profile_id, profile_version_id, claims)
+            context = self.contexts.build(
+                profile_version_id, master_cv_version_id, track_version_id,
+                trust_level="EXPLORATION", build_operation_id=operation_id, activate=False)
+            created_ids["contexts"].append(context["id"])
+            focus = context["context"]["research_track"]["title"]
+            summary_path, _ = self._summary(
+                owner, profile_version_id, track_version_id, focus, claims, documents)
+            self.contexts.activate(context["id"], operation_id)
+            context = self.contexts.get(context["id"])
+            self._finish_operation(
+                operation_id, "ACTIVE", profile_id=profile_id, trust_level="EXPLORATION",
+                exploration_context_id=context["id"], created_ids=created_ids)
+            return self._result(context, profile_id, added, claims, tuple(dict.fromkeys(warnings)),
+                                summary_path, confirmed=False, operation_id=operation_id)
+        except Exception as error:
+            if context and context.get("status") == "BUILDING":
+                self.contexts.mark_failed(context["id"])
+            self._finish_operation(
+                operation_id, "FAILED", profile_id=profile_id, created_ids=created_ids,
+                error_text=str(error))
+            raise
+
+    def confirm(self, profile_id: int | None = None) -> ProfileBuildResult:
+        context = self.contexts.latest(profile_id)
+        if not context:
+            raise ValueError("Build a profile from your documents first")
+        profile_id = context["context"]["profile_id"]
+        claims = self._usable_claims(profile_id)
+        if context.get("trust_level") == "TRUSTED":
+            latest_summary = self.latest_summary()
+            path = latest_summary[0] if latest_summary else Path("applicant-profile.md")
+            return self._result(context, profile_id, 0, claims, (), path, confirmed=True, operation_id=None)
+        operation_id = self._start_operation(context["context"]["owner_name"],
+                                             context["context"]["research_track"]["title"])
+        confirmed_context = None
+        try:
+            for claim in claims:
+                if claim["review_status"] != "PENDING":
+                    continue
+                notes = (claim["notes"] or "") + "\nConfirmed with Use this profile."
+                try:
+                    self.truth.review_claim(
+                        claim["id"], True, self.reviewer, verification_state="VERIFIED",
+                        for_application=True, for_outreach=True, notes=notes,
+                    )
+                except ValueError as error:
+                    if claim["classification"] != "ASPIRATION" or "future aim" not in str(error):
+                        raise
+                    self.truth.review_claim(
+                        claim["id"], False, self.reviewer,
+                        notes=notes + "\nSkipped because the extracted wording did not describe a future aim.",
+                    )
+            approved = [claim for claim in self._usable_claims(profile_id)
+                        if claim["review_status"] == "APPROVED"]
+            if not any(claim["classification"] == "FACT" for claim in approved):
+                raise ValueError("Confirm at least one extracted fact before using this profile")
+            profile_version_id = context["profile_version_id"]
+            with connect(self.db_path) as db:
+                profile_version = db.execute("SELECT approval_state FROM profile_versions WHERE id=?",
+                                             (profile_version_id,)).fetchone()
+            if profile_version and profile_version["approval_state"] == "DRAFT":
+                self.truth.approve_profile_version(profile_version_id, self.reviewer)
+            track_version_id = context["research_track_version_id"]
+            with connect(self.db_path) as db:
+                track = db.execute("SELECT approval_state FROM research_track_versions WHERE id=?",
+                                   (track_version_id,)).fetchone()
+                master = db.execute("SELECT approval_state FROM master_cv_versions WHERE id=?",
+                                    (context["master_cv_version_id"],)).fetchone()
+            if track and track["approval_state"] == "DRAFT":
+                self.truth.approve_track(track_version_id, self.reviewer)
+            if master and master["approval_state"] == "DRAFT":
+                self.studio.review_master_cv(context["master_cv_version_id"], self.reviewer, True)
+            confirmed_context = self.contexts.build(
+                context["profile_version_id"], context["master_cv_version_id"],
+                track_version_id, trust_level="TRUSTED", build_operation_id=operation_id,
+                activate=False)
+            documents = self.source_documents()
+            summary_path, _ = self._summary(
+                context["context"]["owner_name"], context["profile_version_id"],
+                track_version_id, context["context"]["research_track"]["title"],
+                approved, documents)
+            self.contexts.activate(confirmed_context["id"], operation_id)
+            confirmed_context = self.contexts.get(confirmed_context["id"])
+            self._finish_operation(
+                operation_id, "ACTIVE", profile_id=profile_id, trust_level="TRUSTED",
+                exploration_context_id=context["id"], trusted_context_id=confirmed_context["id"])
+            return self._result(confirmed_context, profile_id, 0, approved, (), summary_path,
+                                confirmed=True, operation_id=operation_id)
+        except Exception as error:
+            if confirmed_context and confirmed_context.get("status") == "BUILDING":
+                self.contexts.mark_failed(confirmed_context["id"])
+            self._finish_operation(operation_id, "FAILED", profile_id=profile_id, error_text=str(error))
+            raise
