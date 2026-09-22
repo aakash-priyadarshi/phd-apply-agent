@@ -216,6 +216,7 @@ class OutreachService:
                       profile_version_id: int, track_version_id: int, *,
                       campaign_id: int | None = None, stage: str = "INITIAL",
                       allow_package_id: int | None = None) -> OutreachContext:
+        """Build a reviewed outreach context or raise with all blocking reasons."""
         reasons = []
         try:
             _, track, approved = self.materials._approved_context(profile_version_id, track_version_id, "outreach")

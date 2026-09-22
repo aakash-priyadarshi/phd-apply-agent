@@ -978,6 +978,7 @@ class ProgrammeOrchestrator:
                 "application_id": application_id, "source_evidence_id": source}
 
     def professor_cards(self, application_id: int, context_id: int) -> list[dict]:
+        """Build source-backed professor cards ranked by applicant research fit."""
         with connect(self.db_path) as db:
             app = db.execute("SELECT * FROM applications WHERE id=?", (application_id,)).fetchone()
             if not app:

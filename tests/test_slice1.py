@@ -38,6 +38,7 @@ def legacy_copy(tmp_path):
 
 
 def test_migration_preserves_156_legacy_professors_and_is_idempotent(legacy_copy):
+    """All legacy professors survive migration 13 and repeated migration runs."""
     with connect(legacy_copy) as db:
         old_rows = [tuple(r) for r in db.execute("SELECT * FROM professors ORDER BY id")]
         old_schema = db.execute("SELECT sql FROM sqlite_master WHERE name = 'professors'").fetchone()[0]

@@ -114,6 +114,7 @@ class OperationService:
     def queue(self, operation_type: str, *, search_id: int | None = None,
               application_id: int | None = None, context_id: int | None = None,
               faculty_id: int | None = None) -> int:
+        """Validate and enqueue a search, scan, or faculty research operation."""
         if operation_type not in {"PROGRAMME_SEARCH", "FACULTY_DISCOVERY", *SCAN_TYPES}:
             raise ValueError("Unsupported background operation")
         if faculty_id and operation_type != "FACULTY_DISCOVERY":
@@ -291,6 +292,7 @@ class OperationService:
     def _progress(self, operation_id: int, *, stage: str, item: str = "", completed: int | None = None,
                   total: int | None = None, checkpoint: dict | None = None, model: str | None = None,
                   event: str | None = None) -> bool:
+        """Persist progress for a running operation and report whether it may continue."""
         with transaction(self.db_path) as db:
             row = db.execute("SELECT status,search_id,application_id,faculty_profile_id FROM operations WHERE id=?", (operation_id,)).fetchone()
             if not row or row["status"] != "RUNNING":
@@ -314,6 +316,7 @@ class OperationService:
         return True
 
     def _finish(self, operation_id: int, status: str, *, error: str | None = None, results: int | None = None) -> None:
+        """Finalize an operation with its status, result count, and optional error."""
         with transaction(self.db_path) as db:
             row = db.execute("SELECT status,search_id,application_id,operation_type,faculty_profile_id FROM operations WHERE id=?", (operation_id,)).fetchone()
             if not row:
@@ -352,6 +355,7 @@ class OperationService:
             self._event(db, operation_id, f"{status.title()}: {results} {label}")
 
     def run(self, operation_id: int, *, provider=None, api_key: str | None = None, fetcher=None) -> None:
+        """Run a queued operation and persist its terminal outcome."""
         if not self._claim(operation_id):
             return
         operation = self.get(operation_id)
@@ -427,6 +431,7 @@ class OperationService:
 
     def _research(self, operation_id: int, operation: dict, orchestrator: ProgrammeOrchestrator,
                   *, fetcher=None) -> None:
+        """Collect reviewable research from identity-matched official faculty pages."""
         from urllib.parse import urljoin, urlparse
         from bs4 import BeautifulSoup
 

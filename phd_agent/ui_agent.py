@@ -344,6 +344,7 @@ def _applications(path: Path, context: dict) -> None:
 
 
 def _professors(path: Path, context: dict, reviewer: str) -> None:
+    """Render the legacy professor workspace and its review controls."""
     orchestrator = ProgrammeOrchestrator(path)
     apps = Ledger(path).list_applications()
     st.header("Professors & Messages")

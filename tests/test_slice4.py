@@ -109,6 +109,7 @@ def test_context_grounded_draft_quality_and_immutable_package(case):
 
 
 def test_rejected_professor_cannot_be_prepared_for_outreach(case):
+    """Rejecting a professor blocks new outreach preparation for that application."""
     c = case
     FacultyResearch(c["path"]).decide(c["app"], "REJECTED", faculty_id=c["faculty"])
     with pytest.raises(OutreachBlocked, match="PROFESSOR_REJECTED_FOR_APPLICATION"):

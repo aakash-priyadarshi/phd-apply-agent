@@ -487,6 +487,7 @@ def test_faculty_web_discovery_queues_unverified_official_candidate(applicant, m
 
 
 def test_migration_contains_intent_context_and_browser_tables(tmp_path):
+    """Migration 13 preserves the complete intent-first schema."""
     path = tmp_path / "schema.db"
     migrate(path)
     with connect(path) as db:

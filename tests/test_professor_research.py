@@ -26,6 +26,7 @@ PAGE = """<html><body><h1>Professor Ada</h1><p>Example University, Computer Scie
 
 @pytest.fixture
 def case(tmp_path):
+    """Create an application with applicant context for professor research tests."""
     path = tmp_path / "phd_outreach.db"
     profile = ProfileWorkspace(path).build("Aakash Example", "Reliable agents", [ProfileUpload(
         "cv.txt", b"Aakash Example\nResearch project: I evaluated long-horizon retrieval agents with soundness checks.\n"
@@ -37,6 +38,7 @@ def case(tmp_path):
 
 
 def _discover(case, monkeypatch):
+    """Configure deterministic official-page discovery for the synthetic professor."""
     path, context_id, application = case
     orchestrator = ProgrammeOrchestrator(path)
 
@@ -44,6 +46,7 @@ def _discover(case, monkeypatch):
         provider = "fixture"
 
         def search(self, *args, **kwargs):
+            """Return the synthetic official faculty profile as the sole search hit."""
             return [OfficialSearchResult("Professor Ada profile", "Example University",
                 "https://example.edu/faculty/ada", "FACULTY", "Agent research", "Professor Ada", "Computer Science")]
 
@@ -54,6 +57,7 @@ def _discover(case, monkeypatch):
 
 
 def test_pending_extraction_is_sourced_and_decisions_survive_discovery(case, monkeypatch):
+    """Pending extraction stays sourced while reruns preserve applicant decisions."""
     path, context_id, application = case
     orchestrator, provider, _ = _discover(case, monkeypatch)
     first = orchestrator.discover_faculty_official_web(application, context_id, provider=provider)
@@ -83,6 +87,7 @@ def test_pending_extraction_is_sourced_and_decisions_survive_discovery(case, mon
 
 
 def test_reviewed_card_keeps_verified_work_and_proposals_separate(case, monkeypatch):
+    """Professor cards separate verified work from proposed applicant overlap."""
     path, context_id, application = case
     orchestrator, provider, _ = _discover(case, monkeypatch)
     candidate = orchestrator.discover_faculty_official_web(application, context_id, provider=provider)["queued"][0]
@@ -137,6 +142,7 @@ def test_reviewed_card_keeps_verified_work_and_proposals_separate(case, monkeypa
 
 
 def test_deep_research_stops_resumes_and_never_inferrs_supervision(case, monkeypatch):
+    """Deep research resumes safely without inferring supervision availability."""
     path, context_id, application = case
     orchestrator, provider, text = _discover(case, monkeypatch)
     candidate = orchestrator.discover_faculty_official_web(application, context_id, provider=provider)["queued"][0]
@@ -150,6 +156,7 @@ def test_deep_research_stops_resumes_and_never_inferrs_supervision(case, monkeyp
     calls = []
 
     def fetch(url):
+        """Return fixture content and request a stop after the first fetch."""
         calls.append(url)
         if len(calls) == 1:
             service.stop(operation)
@@ -177,11 +184,13 @@ def test_deep_research_stops_resumes_and_never_inferrs_supervision(case, monkeyp
 
 
 def test_unlabelled_paper_does_not_become_current_project():
+    """An unlabelled publication is never classified as a current project."""
     extracted = extract_official_research("Research interests: agents\nRecent publications:\n2026 - Agent paper")
     assert extracted["current_projects"] == []
 
 
 def test_unchanged_research_refresh_preserves_review_but_changed_content_requires_review(case):
+    """Only changed research content resets a verified snapshot to review."""
     path, _, _ = case
     discovery = Discovery(path)
     faculty_id = discovery.create_faculty("Professor Ada", "Example University",
@@ -202,6 +211,7 @@ def test_unchanged_research_refresh_preserves_review_but_changed_content_require
 
 
 def test_deeper_lab_page_without_professor_identity_is_not_attributed(case, monkeypatch):
+    """A lab page lacking the professor's identity is not attributed to them."""
     path, context_id, application = case
     orchestrator, provider, text = _discover(case, monkeypatch)
     candidate = orchestrator.discover_faculty_official_web(application, context_id, provider=provider)["queued"][0]
@@ -223,6 +233,7 @@ def test_deeper_lab_page_without_professor_identity_is_not_attributed(case, monk
 
 
 def test_people_renders_source_backed_pending_and_reviewed_cards(case, monkeypatch):
+    """The People page renders sourced cards and reversible decisions."""
     path, context_id, application = case
     orchestrator, provider, _ = _discover(case, monkeypatch)
     lead = orchestrator.discover_faculty_official_web(application, context_id, provider=provider)["queued"][0]

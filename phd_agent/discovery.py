@@ -295,6 +295,7 @@ class Discovery:
     def create_faculty(self, name: str, institution: str, *, profile_url: str | None = None,
                        department: str | None = None, evidence_id: int | None = None,
                        candidate_id: int | None = None) -> int:
+        """Create a faculty profile and carry forward any reviewed candidate state."""
         if not name.strip() or not institution.strip():
             raise ValueError("Name and institution are required")
         signals = self.duplicate_signals(name, institution, profile_url)

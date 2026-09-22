@@ -295,6 +295,7 @@ MIGRATIONS = (
 
 
 def migrate(path: Path | str) -> list[int]:
+    """Apply pending schema migrations and return their version numbers."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     applied: list[int] = []

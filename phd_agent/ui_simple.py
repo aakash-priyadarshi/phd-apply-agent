@@ -708,6 +708,7 @@ def _applications(path: Path, context: dict) -> None:
 
 
 def _people(path: Path, context: dict) -> None:
+    """Render professor research cards, filters, and application decisions."""
     orchestrator = ProgrammeOrchestrator(path)
     applications = Ledger(path).list_applications()
     st.title("People")
@@ -868,6 +869,7 @@ def _people(path: Path, context: dict) -> None:
 
 @st.fragment(run_every="2s")
 def _live_faculty_leads(path: Path, institution: str, application_id: int, context_id: int) -> None:
+    """Render live pending faculty leads and their application decisions."""
     research = FacultyResearch(path)
     pending = [item for item in Discovery(path).list_faculty_candidates()
                if item["review_state"] == "NEW" and item["institution"].casefold() == institution.casefold()]

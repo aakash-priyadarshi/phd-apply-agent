@@ -80,11 +80,13 @@ def extract_official_research(text: str, html: str | None = None) -> dict:
 
 class FacultyResearch:
     def __init__(self, db_path: Path | str):
+        """Open the faculty research store, applying pending migrations first."""
         self.db_path = Path(db_path)
         migrate(self.db_path)
 
     def save_snapshot(self, source_url: str, evidence_id: int, metadata: dict, *,
                       candidate_id: int | None = None, faculty_id: int | None = None) -> int:
+        """Create or refresh a source-backed research snapshot for one subject."""
         if not (candidate_id or faculty_id):
             raise ValueError("A professor or pending lead is required")
         url = canonical_url(source_url)
@@ -116,6 +118,7 @@ class FacultyResearch:
                                            json.dumps(metadata), now)).lastrowid
 
     def snapshots(self, *, candidate_id: int | None = None, faculty_id: int | None = None) -> list[dict]:
+        """Return newest-first research snapshots for one candidate or faculty profile."""
         if (candidate_id is None) == (faculty_id is None):
             raise ValueError("Choose one research subject")
         field, value = ("candidate_id", candidate_id) if candidate_id else ("faculty_profile_id", faculty_id)
@@ -128,6 +131,7 @@ class FacultyResearch:
         return rows
 
     def review_snapshot(self, snapshot_id: int, reviewer: str) -> None:
+        """Mark a research snapshot as verified by the named reviewer."""
         if not reviewer.strip():
             raise ValueError("Reviewer required")
         with transaction(self.db_path) as db:
@@ -139,6 +143,7 @@ class FacultyResearch:
 
     def decision(self, application_id: int, *, candidate_id: int | None = None,
                  faculty_id: int | None = None) -> dict | None:
+        """Return the application-specific decision for one professor or lead."""
         if (candidate_id is None) == (faculty_id is None):
             raise ValueError("Choose one professor or lead")
         field, value = ("candidate_id", candidate_id) if candidate_id else ("faculty_profile_id", faculty_id)
@@ -149,6 +154,7 @@ class FacultyResearch:
 
     def decide(self, application_id: int, state: str, *, candidate_id: int | None = None,
                faculty_id: int | None = None) -> None:
+        """Record a reversible application decision and its audit event."""
         if state not in {"UNDECIDED", "PURSUE", "REJECTED", "ARCHIVED"}:
             raise ValueError("This decision must be made through its own contact workflow")
         if (candidate_id is None) == (faculty_id is None):
