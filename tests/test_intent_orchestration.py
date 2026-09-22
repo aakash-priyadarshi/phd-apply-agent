@@ -492,7 +492,7 @@ def test_migration_contains_intent_context_and_browser_tables(tmp_path):
     with connect(path) as db:
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         version = db.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-    assert version == 10
+    assert version == 11
     assert {"applicant_research_contexts", "context_retrievals", "programme_candidates",
             "browser_fill_plans", "workload_events", "profile_build_operations",
             "university_rankings", "university_aliases"} <= tables
@@ -508,5 +508,5 @@ def test_intent_first_streamlit_home_renders_with_approved_context(applicant, mo
     app = AppTest.from_file(Path(__file__).resolve().parents[1] / "streamlit_app.py", default_timeout=60).run()
     assert not app.exception
     assert app.toggle[0].label == "Advanced tools"
-    assert any(area.label == "Navigation" and area.value == "Home" for area in app.radio)
+    assert any(area.label == "Navigation" and area.value == "Today" for area in app.radio)
     assert any("Welcome back" in markdown.value for markdown in app.markdown)

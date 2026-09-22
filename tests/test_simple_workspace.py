@@ -307,10 +307,10 @@ def test_simple_workspace_renders_setup_then_task_navigation(tmp_path, monkeypat
     ready = AppTest.from_file(app_path, default_timeout=60).run()
     assert not ready.exception
     navigation = next(radio for radio in ready.radio if radio.label == "Navigation")
-    assert navigation.options == ["Home", "Find programmes", "Applications", "Universities", "People", "My documents", "Searches", "Operations"]
+    assert navigation.options == ["Today", "Find programmes", "Applications", "Universities", "People", "My documents", "Searches", "Operations", "Calendar"]
     assert any("Welcome back" in markdown.value for markdown in ready.markdown)
     assert any(button.label == "Use this profile" for button in ready.button)
-    assert PAGES == ("Home", "Find programmes", "Applications", "Universities", "People", "My documents", "Searches", "Operations")
+    assert PAGES == ("Today", "Find programmes", "Applications", "Universities", "People", "My documents", "Searches", "Operations", "Calendar")
     ledger = Ledger(tmp_path / "phd_outreach.db")
     ledger.create_application(
         "2027", programme_id=ledger.create_programme(

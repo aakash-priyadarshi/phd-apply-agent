@@ -35,6 +35,8 @@ For tests, install `requirements-dev.txt` in the same environment, run `python -
 
 The [search operations guide](docs/search-operations.md) explains saved searches, live progress, stop/resume, grouping, and reversible application corrections.
 
+The [Today and Calendar guide](docs/today-calendar.md) explains daily priorities, sourced dates, and editable personal events.
+
 ## Local data
 
 All runtime files are kept outside Git under `data/` by default:
