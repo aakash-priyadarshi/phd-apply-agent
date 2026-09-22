@@ -337,6 +337,16 @@ def _candidate(orchestrator: ProgrammeOrchestrator, candidate: dict) -> None:
             st.link_button("Open official page", candidate["canonical_url"])
 
 
+def focus_keys_for_today_item(item: dict) -> dict[str, int | None]:
+    """Keep each Today destination from writing another page's application filter."""
+    application_id = item.get("application_id")
+    page = item.get("page")
+    return {
+        "simple_focus_application_id": application_id if application_id and page == "Applications" else None,
+        "simple_focus_people_application_id": application_id if application_id and page == "People" else None,
+    }
+
+
 def _home(path: Path, context: dict) -> None:
     planner = DailyPlanner(path)
     dashboard = planner.dashboard()
@@ -362,8 +372,11 @@ def _home(path: Path, context: dict) -> None:
             left.caption(f"{item['priority'].title()} · {item['detail']}")
             if right.button("Open", key=f"today_open_{index}"):
                 st.session_state.simple_nav_target = item["page"]
-                if item.get("application_id"):
-                    st.session_state.simple_focus_application_id = item["application_id"]
+                for key, value in focus_keys_for_today_item(item).items():
+                    if value is None:
+                        st.session_state.pop(key, None)
+                    else:
+                        st.session_state[key] = value
                 st.rerun()
             if item.get("task_id") and st.button("Mark task done", key=f"today_complete_{item['task_id']}"):
                 if _run(lambda item=item: planner.complete_task(item["task_id"]), "Task completed"):
@@ -607,12 +620,18 @@ def _people(path: Path, context: dict) -> None:
     applications = Ledger(path).list_applications()
     st.title("People")
     st.caption("Find supervisors whose current research overlaps with your demonstrated experience.")
+    focus = st.session_state.pop("simple_focus_people_application_id", None)
     if not applications:
         st.info("Add an application before looking for supervisors.")
         return
     mapping = {row["id"]: row for row in applications}
+    if focus in mapping:
+        st.session_state.simple_people_application = focus
+    elif st.session_state.get("simple_people_application") not in mapping:
+        st.session_state.pop("simple_people_application", None)
     application_id = st.selectbox("Application", list(mapping),
-        format_func=lambda value: f"{mapping[value]['institution']} · {mapping[value]['application_name']}")
+        format_func=lambda value: f"{mapping[value]['institution']} · {mapping[value]['application_name']}",
+        key="simple_people_application")
     if not os.getenv("OPENAI_API_KEY", "").strip():
         st.caption("Official faculty search needs the configured research provider; saved professors are shown below.")
     if st.button("Find relevant supervisors", type="primary",

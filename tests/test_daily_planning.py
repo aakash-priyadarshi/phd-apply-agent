@@ -11,6 +11,7 @@ from phd_agent.ledger import Ledger
 from phd_agent.planning import DailyPlanner
 from phd_agent.profile_workspace import ProfileUpload, ProfileWorkspace
 from phd_agent.record_controls import RecordControls
+from phd_agent.ui_simple import focus_keys_for_today_item
 
 
 def _application(tmp_path):
@@ -69,6 +70,25 @@ def test_manual_event_rejects_archived_application_and_bad_dates(tmp_path):
     RecordControls(path).archive_application(app_id)
     with pytest.raises(ValueError, match="active application"):
         planner.create_event("Interview", "INTERVIEW", date.today().isoformat(), application_id=app_id)
+
+
+def test_today_open_keeps_application_focus_on_the_destination_page():
+    applications = focus_keys_for_today_item({"application_id": 3, "page": "Applications"})
+    people = focus_keys_for_today_item({"application_id": 7, "page": "People"})
+    calendar = focus_keys_for_today_item({"application_id": 3, "page": "Calendar"})
+    assert applications == {
+        "simple_focus_application_id": 3,
+        "simple_focus_people_application_id": None,
+    }
+    assert people == {
+        "simple_focus_application_id": None,
+        "simple_focus_people_application_id": 7,
+    }
+    assert calendar == {
+        "simple_focus_application_id": None,
+        "simple_focus_people_application_id": None,
+    }
+    assert focus_keys_for_today_item({"page": "Find programmes"}) == calendar
 
 
 def test_daily_priority_and_task_completion_are_deterministic(tmp_path):
