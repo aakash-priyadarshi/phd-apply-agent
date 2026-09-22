@@ -29,13 +29,16 @@ def main(
 ) -> None:
     env = os.environ if environ is None else environ
     try:
-        prepare_runtime(root, env if environ is not None else None, secrets_path=secrets_path)
+        settings = prepare_runtime(root, env if environ is not None else None, secrets_path=secrets_path)
     except StartupError as error:
         print(str(error), file=sys.stderr)
         raise SystemExit(1) from error
     port = (env.get("PORT") or "").strip()
     if not port.isdigit():
         raise SystemExit("PORT must be provided by the host")
+    # Launcher runs once per service start; Streamlit reruns its script on each interaction.
+    from phd_agent.operations import OperationService
+    OperationService(settings.database_path).recover_interrupted()
     argv = streamlit_command(port)
     runner = exec_fn or os.execvp
     runner(argv[0], argv)

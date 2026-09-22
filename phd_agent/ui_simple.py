@@ -13,14 +13,35 @@ from phd_agent.browser_worker import FormPlanService, companion_command, fields_
 from phd_agent.config import load_settings
 from phd_agent.db import connect
 from phd_agent.discovery import Discovery
-from phd_agent.ledger import Ledger
+from phd_agent.ledger import APPLICATION_STATUSES, Ledger
+from phd_agent.operations import OperationService
 from phd_agent.orchestration import ProgrammeOrchestrator
 from phd_agent.outreach import OutreachService
 from phd_agent.profile_workspace import ProfileUpload, ProfileWorkspace
-from phd_agent.university_enrichment import REGION_COUNTRY_CODES, qs_sort_key
+from phd_agent.record_controls import PROGRAMME_TYPES, RecordControls, filter_programmes, group_programmes
+from phd_agent.university_enrichment import REGION_COUNTRY_CODES, qs_sort_key, resolve_country_label
 
 
-PAGES = ("Home", "Find programmes", "Applications", "People", "My documents")
+PAGES = ("Home", "Find programmes", "Applications", "Universities", "People", "My documents", "Searches", "Operations")
+COUNTRY_CHOICES = ("UK", "US", "Canada", "Switzerland", "Australia", "Singapore", "Germany",
+                   "Netherlands", "France", "Ireland", "Sweden", "Europe")
+
+
+def _country_codes(names: list[str]) -> list[str]:
+    codes = set()
+    for name in names:
+        if name.upper() in REGION_COUNTRY_CODES:
+            codes.update(REGION_COUNTRY_CODES[name.upper()])
+        else:
+            code = resolve_country_label(name)[1]
+            if code:
+                codes.add(code)
+    return sorted(codes)
+
+
+def _country_selections(codes: list[str]) -> list[str]:
+    selected = set(codes)
+    return [name for name in COUNTRY_CHOICES if set(_country_codes([name])).issubset(selected)]
 
 
 def _css() -> None:
@@ -194,36 +215,73 @@ def _profile_setup(path: Path) -> None:
     st.caption("PDF, DOCX, TXT and Markdown are supported. Highly sensitive identity documents should stay outside this profile builder.")
 
 
-def _create_intent(orchestrator: ProgrammeOrchestrator, context: dict, *, key: str) -> None:
+def _create_intent(path: Path, context: dict, *, key: str) -> None:
     with st.form(key):
+        title = st.text_input("Name this search", placeholder="Funded AI PhDs · 2027")
         intent = st.text_area(
             "What are you looking for?", height=105,
             placeholder="Funded 2027 PhD programmes in reliable AI and agent evaluation in the UK, Europe, US and Canada",
         )
-        submitted = st.form_submit_button("Find programmes", type="primary", use_container_width=True)
+        with st.expander("Search settings"):
+            countries = st.multiselect("Countries", COUNTRY_CHOICES, key=f"{key}_countries")
+            kinds = st.multiselect("Programme types", PROGRAMME_TYPES, format_func=lambda value: value.replace("_", " ").title(), key=f"{key}_kinds")
+            funding = st.selectbox("Funding", ("Any", "Funded", "Unknown"), key=f"{key}_funding")
+            qs = st.selectbox("QS World Rank", ("Any", "Top 25", "Top 50", "Top 100", "Top 200"), key=f"{key}_qs")
+            min_fit = st.slider("Minimum research fit", 0.0, 10.0, 0.0, 0.5, key=f"{key}_fit")
+            pages = st.slider("Official pages to check", 1, 12, 8, key=f"{key}_pages")
+        submitted = st.form_submit_button("Start search", type="primary", use_container_width=True)
     if not submitted:
         return
-    created = _run(lambda: orchestrator.create_intent(intent, context["id"]))
-    if not created:
-        return
-    st.session_state.simple_intent_id = created["id"]
-    _run(lambda: orchestrator.discover_from_ledger(created["id"]))
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    discovery = None
-    if api_key:
-        discovery = _run(lambda: orchestrator.discover_official_web(created["id"], api_key=api_key))
-    found = 0
-    if isinstance(discovery, dict):
-        found = len(discovery.get("candidates") or [])
-    waiting = orchestrator.list_candidates(states=("NEW", "SHORTLISTED", "ACCEPTED"))
-    found = max(found, len(waiting))
-    st.session_state.simple_nav_target = "Find programmes"
-    st.session_state.simple_discovery_notice = (
-        f"Search finished. {found} programme result{'s' if found != 1 else ''} "
-        "are ready on this page."
-        if found else "Search finished. Review any programme results below, or paste an official URL."
-    )
-    st.rerun()
+    criteria = {"country_codes": _country_codes(countries),
+                "programme_types": kinds, "funding": funding,
+                "qs_max": int(qs.split()[-1]) if qs != "Any" else None,
+                "min_research_fit": min_fit, "max_pages": pages}
+    service = OperationService(path)
+    def start():
+        search = service.create_search(title or intent[:64], intent, context["id"], criteria)
+        operation_id = service.queue("PROGRAMME_SEARCH", search_id=search["id"])
+        service.launch(operation_id)
+        return search
+    created = _run(start)
+    if created:
+        st.session_state.simple_search_id = created["id"]
+        st.session_state.simple_intent_id = created["intent_id"]
+        st.session_state.simple_nav_target = "Find programmes"
+        st.rerun()
+
+
+@st.fragment(run_every="2s")
+def _operation_live(path: Path, *, search_id: int | None = None, application_id: int | None = None) -> None:
+    service = OperationService(path)
+    operations = [item for item in service.list() if
+                  (search_id is None or item["search_id"] == search_id) and
+                  (application_id is None or item["application_id"] == application_id)]
+    for item in operations[:5]:
+        with st.container(border=True):
+            st.write(f"**{item['title']}** · {item['status'].replace('_', ' ').title()}")
+            st.caption(" · ".join(filter(None, (item["stage"], item["current_item"], item["model_route"]))))
+            if item["total_units"]:
+                st.progress(min(1., item["completed_units"] / item["total_units"]),
+                            text=f"{item['completed_units']}/{item['total_units']} official pages checked · {item['results_found']} saved")
+            else:
+                st.caption(f"{item['completed_units']} checked · {item['results_found']} saved; finding pages or checking saved records")
+            if item["error_summary"]:
+                st.warning(item["error_summary"])
+            if item["status"] in {"QUEUED", "RUNNING"}:
+                if st.button("Stop", key=f"simple_stop_{item['id']}"):
+                    _run(lambda: service.stop(item["id"]), "Stop requested. The current page may finish first.")
+                    st.rerun(scope="fragment")
+            elif item["status"] in {"CANCELLED", "INTERRUPTED", "FAILED"}:
+                left, right = st.columns(2)
+                if left.button("Resume", key=f"simple_resume_{item['id']}"):
+                    if _run(lambda: (service.resume(item["id"]), service.launch(item["id"]))):
+                        st.rerun(scope="fragment")
+                if right.button("Retry", key=f"simple_retry_{item['id']}"):
+                    if _run(lambda: (service.resume(item["id"], retry=True), service.launch(item["id"]))):
+                        st.rerun(scope="fragment")
+            with st.expander("Activity"):
+                for event in service.events(item["id"])[-12:]:
+                    st.caption(f"{event['created_at']} · {event['event_text']}")
 
 
 def _candidate(orchestrator: ProgrammeOrchestrator, candidate: dict) -> None:
@@ -246,7 +304,7 @@ def _candidate(orchestrator: ProgrammeOrchestrator, candidate: dict) -> None:
             st.write("**Why it matches your profile:**", relevant[0])
         if candidate["review_state"] != "ACCEPTED":
             st.caption("Adding accepts the university and programme. Deadline and supervisor contact stay unverified.")
-            add, save, dismiss = st.columns([1.25, 1, 1])
+            add, save, dismiss, remove = st.columns([1.25, 1, 1, 1])
             if add.button("Add application", key=f"simple_add_{candidate['id']}", type="primary"):
                 confirmed = {key: payload.get(key) for key in (
                     "university", "programme", "department", "degree", "intake",
@@ -262,6 +320,10 @@ def _candidate(orchestrator: ProgrammeOrchestrator, candidate: dict) -> None:
             if dismiss.button("Dismiss", key=f"simple_dismiss_{candidate['id']}"):
                 if _run(lambda: orchestrator.review_candidate(candidate["id"], "REJECTED", "Local operator"),
                         "Candidate dismissed"):
+                    st.rerun()
+            if remove.button("Remove", key=f"simple_remove_{candidate['id']}"):
+                if _run(lambda: RecordControls(orchestrator.db_path).archive_candidate(candidate["id"]),
+                        "Result removed; you can restore it later"):
                     st.rerun()
         with st.expander("Details and source"):
             for label, value in (
@@ -281,7 +343,12 @@ def _home(path: Path, context: dict) -> None:
       <h2>Welcome back, {html.escape(owner)}</h2><div class="muted">Tell the app what you want to find.
       Your CV and supporting documents are already available as context.</div></div>""", unsafe_allow_html=True)
     _profile_banner(path, context)
-    _create_intent(orchestrator, context, key="simple_home_intent")
+    _create_intent(path, context, key="simple_home_intent")
+    active = [operation for operation in OperationService(path).list(10)
+              if operation["status"] in {"QUEUED", "RUNNING", "CANCEL_REQUESTED"}]
+    if active:
+        st.subheader("Running now")
+        _operation_live(path)
     waiting = orchestrator.list_candidates(states=("NEW", "SHORTLISTED"))
     st.subheader("Your next step")
     if waiting:
@@ -303,17 +370,27 @@ def _discover(path: Path, context: dict) -> None:
     notice = st.session_state.pop("simple_discovery_notice", None)
     if notice:
         st.success(notice)
-    _create_intent(orchestrator, context, key="simple_discover_intent")
+    _create_intent(path, context, key="simple_discover_intent")
+    searches = OperationService(path).list_searches()
+    search_options = {item["id"]: item for item in searches}
+    search_id = st.selectbox("Search results", [None, *search_options],
+        format_func=lambda value: "All searches" if value is None else search_options[value]["title"],
+        key="simple_search_id")
+    if search_id is not None:
+        st.caption("Saved settings: " + ", ".join(f"{key.replace('_', ' ')}: {value}"
+                   for key, value in search_options[search_id]["criteria"].items() if value not in (None, [], "Any", 0)))
+    _operation_live(path, search_id=search_id)
     st.divider()
     filters = st.columns(4)
-    countries = filters[0].multiselect("Countries", ["UK", "US", "Canada", "Switzerland", "Australia", "Singapore", "Europe"])
+    countries = filters[0].multiselect("Countries", COUNTRY_CHOICES)
     qs_choice = filters[1].selectbox("QS World Rank", ["Any", "Top 25", "Top 50", "Top 100", "Top 150", "Top 200"])
     funded_only = filters[2].checkbox("Funded only")
     min_fit = filters[3].slider("Minimum research fit", 0.0, 10.0, 0.0, 0.5)
+    kinds = st.multiselect("Programme types", PROGRAMME_TYPES,
+                           format_func=lambda value: value.replace("_", " ").title())
     extra = {"funded_only": funded_only or None, "min_research_fit": min_fit or None}
     if countries:
-        extra["country_codes"] = sorted({code for name in countries
-                                         for code in REGION_COUNTRY_CODES.get(name.upper(), set())})
+        extra["country_codes"] = _country_codes(countries)
     if qs_choice != "Any":
         extra["qs_max"] = int(qs_choice.split()[-1])
     extra = {key: value for key, value in extra.items() if value}
@@ -338,23 +415,74 @@ def _discover(path: Path, context: dict) -> None:
                 url or result.get("url", ""), text, context["id"],
                 intent_id=st.session_state.get("simple_intent_id"))):
             st.rerun()
+    _live_results(path, search_options[search_id] if search_id else None, extra, kinds)
+
+
+@st.fragment(run_every="2s")
+def _live_results(path: Path, search: dict | None, extra: dict, kinds: list[str]) -> None:
+    orchestrator = ProgrammeOrchestrator(path)
     st.subheader("Results")
-    candidates = orchestrator.list_candidates(states=("NEW", "SHORTLISTED", "ACCEPTED"), extra_filters=extra)
+    candidates = orchestrator.list_candidates(intent_id=search["intent_id"] if search else None,
+                                              states=("NEW", "SHORTLISTED", "ACCEPTED"), extra_filters=extra)
+    if search:
+        candidates = filter_programmes(candidates, search["criteria"])
+    if kinds:
+        candidates = filter_programmes(candidates, {"programme_types": kinds})
     candidates = sorted(candidates, key=lambda item: (-float(item["payload"].get("research_fit") or 0), qs_sort_key(item["payload"])))
+    st.caption(f"{len(candidates)} visible result{'s' if len(candidates) != 1 else ''}")
     if not candidates:
         st.caption("No programme results yet.")
-    for candidate in candidates:
-        _candidate(orchestrator, candidate)
+    removable = [item for item in candidates if item["review_state"] != "ACCEPTED"]
+    if removable:
+        with st.expander("Remove several results"):
+            selected = st.multiselect("Select results", [item["id"] for item in removable],
+                format_func=lambda candidate_id: next(
+                    f"{item['payload'].get('university') or 'Unknown'} · {item['payload'].get('programme') or item['canonical_url']}"
+                    for item in removable if item["id"] == candidate_id))
+            if st.button(f"Remove {len(selected)} selected results", disabled=not selected):
+                if _run(lambda: RecordControls(path).archive_candidates(selected), "Results removed; restoration is available below"):
+                    st.rerun()
+    layout = st.radio("Arrange results by", ("Country", "University", "Research fit"), horizontal=True)
+    page_size = 10
+    page_count = max(1, (len(candidates) + page_size - 1) // page_size)
+    page = st.number_input("Page", min_value=1, max_value=page_count, value=1,
+                           key="simple_results_page")
+    visible = candidates[(page - 1) * page_size: page * page_size]
+    if layout == "Research fit":
+        for candidate in visible:
+            _candidate(orchestrator, candidate)
+    else:
+        for group, children in group_programmes(visible, view=layout).items():
+            st.subheader(group)
+            for subgroup, items in children.items():
+                st.markdown(f"**{subgroup}**")
+                for candidate in items:
+                    _candidate(orchestrator, candidate)
+    with st.expander("Removed results"):
+        archived = [item for item in orchestrator.list_candidates(
+                    intent_id=search["intent_id"] if search else None,
+                    states=("NEW", "SHORTLISTED", "REJECTED"),
+                    include_archived=True) if item.get("archived_at")]
+        for item in archived:
+            st.write(item["payload"].get("programme") or item["canonical_url"])
+            if st.button("Restore result", key=f"restore_candidate_{item['id']}"):
+                if _run(lambda item=item: RecordControls(path).archive_candidate(item["id"], False)):
+                    st.rerun()
 
 
 def _applications(path: Path, context: dict) -> None:
     orchestrator = ProgrammeOrchestrator(path)
-    applications = Ledger(path).list_applications()
+    ledger = Ledger(path)
+    controls = RecordControls(path)
+    applications = ledger.list_applications()
     st.title("Applications")
     st.caption("One place for deadlines, missing items and the next action.")
     if not applications:
         st.info("Add a programme from Find programmes and it will appear here.")
-        return
+    view = st.radio("Arrange applications by", ("Deadline", "Country", "University"), horizontal=True)
+    if view != "Deadline":
+        applications = [item for children in group_programmes(applications, view=view).values()
+                        for items in children.values() for item in items]
     for application in applications:
         overview = orchestrator.application_overview(application["id"])
         readiness = overview["readiness"]
@@ -381,11 +509,75 @@ def _applications(path: Path, context: dict) -> None:
             prepared = st.session_state.get(f"simple_prepared_{application['id']}")
             if prepared and prepared["blocking"]:
                 st.warning("Still needed: " + " · ".join(prepared["blocking"]))
-            _browser_continue(path, application, context)
+            with st.expander("Edit details and fill gaps"):
+                with st.form(f"edit_app_{application['id']}"):
+                    cycle = st.text_input("Application cycle", value=application["cycle"] or "")
+                    status = st.selectbox("Status", APPLICATION_STATUSES,
+                        index=APPLICATION_STATUSES.index(application["status"]))
+                    portal = st.text_input("Official application portal", value=application["portal_url"] or "")
+                    funding_state = st.selectbox("Funding status", ("UNKNOWN", "ELIGIBLE", "INELIGIBLE", "PENDING", "CONFIRMED"),
+                        index=("UNKNOWN", "ELIGIBLE", "INELIGIBLE", "PENDING", "CONFIRMED").index(application["funding_state"]))
+                    eligibility_state = st.selectbox("Eligibility status", ("UNKNOWN", "ELIGIBLE", "INELIGIBLE", "PENDING"),
+                        index=("UNKNOWN", "ELIGIBLE", "INELIGIBLE", "PENDING").index(application["eligibility_state"]))
+                    contact_state = st.selectbox("Professor contact", ("UNKNOWN", "NOT_CONTACTED", "CONTACTED", "REPLIED", "NOT_REQUIRED"),
+                        index=("UNKNOWN", "NOT_CONTACTED", "CONTACTED", "REPLIED", "NOT_REQUIRED").index(application["supervisor_contact_state"]))
+                    details_source = st.text_input("Official source for eligibility or funding confirmation")
+                    next_action = st.text_input("Next action", value=application["next_action"] or "")
+                    notes = st.text_area("Your notes", value=application["owner_notes"] or "")
+                    save = st.form_submit_button("Save application")
+                if save and _run(lambda: controls.edit_application(application["id"], cycle=cycle,
+                          status=status, portal_url=portal, next_action=next_action, owner_notes=notes,
+                          funding_state=funding_state, eligibility_state=eligibility_state,
+                          supervisor_contact_state=contact_state, source_url=details_source or None),
+                          "Application updated"):
+                    st.rerun()
+                if application["programme_id"]:
+                    programme = ledger.get("programmes", application["programme_id"])
+                    with st.form(f"edit_programme_{application['id']}"):
+                        university = st.text_input("University", value=programme["university"] or "")
+                        name = st.text_input("Programme", value=programme["programme_name"] or "")
+                        country = st.text_input("Country", value=programme["country"] or "")
+                        department = st.text_input("Department", value=programme["department"] or "")
+                        degree = st.text_input("Degree type", value=programme["degree_type"] or "")
+                        link = st.text_input("Programme URL", value=programme["programme_url"] or "")
+                        source = st.text_input("Official source for confirmed corrections")
+                        verified = st.checkbox("I checked these changes against the official source")
+                        save_programme = st.form_submit_button("Save programme")
+                    if save_programme and _run(lambda: controls.edit_programme(programme["id"],
+                            university=university, programme_name=name, country=country,
+                            department=department, degree_type=degree, programme_url=link,
+                            source_url=source or None, verified=verified), "Programme updated"):
+                        st.rerun()
+                with st.form(f"deadline_{application['id']}"):
+                    due = st.text_input("Add deadline (YYYY-MM-DD)", placeholder="2027-01-15")
+                    deadline_source = st.text_input("Official deadline source URL")
+                    checked = st.checkbox("I verified the deadline on this page")
+                    add_deadline = st.form_submit_button("Add deadline")
+                if add_deadline and _run(lambda: controls.set_deadline(application["id"], due,
+                             source_url=deadline_source, verified=checked), "Deadline recorded"):
+                    st.rerun()
+                for deadline in ledger.list_deadlines(application["id"]):
+                    st.caption(f"{deadline['due_at']} · {deadline['verification_state']} · {deadline['source_url']}")
+            with st.expander("Continue in browser"):
+                _browser_continue(path, application, context)
             with st.expander("Requirements"):
                 for requirement in overview["requirements"]:
                     state = requirement.get("document_state") or requirement["requirement_state"]
                     st.write(f"- {requirement['original_label']}: **{state.replace('_', ' ').title()}**")
+            with st.expander("Remove application"):
+                impact = controls.impact(application["id"])
+                st.caption(f"Hides this application from your workspace. Keeps {impact['professors']} professor links, "
+                           f"{impact['tasks']} tasks and {impact['documents']} document links for restoration.")
+                if st.button("Archive application", key=f"archive_app_{application['id']}"):
+                    if _run(lambda: controls.archive_application(application["id"]), "Application archived"):
+                        st.rerun()
+    archived = [item for item in ledger.list_applications(include_archived=True) if item["archived_at"]]
+    with st.expander(f"Archived applications ({len(archived)})"):
+        for application in archived:
+            st.write(f"{application['institution']} · {application['application_name']}")
+            if st.button("Restore application", key=f"restore_app_{application['id']}"):
+                if _run(lambda application=application: controls.archive_application(application["id"], False)):
+                    st.rerun()
 
 
 def _people(path: Path, context: dict) -> None:
@@ -399,19 +591,18 @@ def _people(path: Path, context: dict) -> None:
     mapping = {row["id"]: row for row in applications}
     application_id = st.selectbox("Application", list(mapping),
         format_func=lambda value: f"{mapping[value]['institution']} · {mapping[value]['application_name']}")
-    if st.button("Find relevant supervisors", type="primary"):
-        cards = _run(lambda: orchestrator.professor_cards(application_id, context["id"]))
-        if cards is not None:
-            st.session_state[f"simple_people_{application_id}"] = cards
-        api_key = os.getenv("OPENAI_API_KEY", "").strip()
-        if api_key:
-            _run(lambda: orchestrator.discover_faculty_official_web(
-                application_id, context["id"], api_key=api_key))
-            refreshed = _run(lambda: orchestrator.professor_cards(application_id, context["id"]))
-            if refreshed is not None:
-                st.session_state[f"simple_people_{application_id}"] = refreshed
-        st.rerun()
-    cards = st.session_state.get(f"simple_people_{application_id}", [])
+    if not os.getenv("OPENAI_API_KEY", "").strip():
+        st.caption("Official faculty search needs the configured research provider; saved professors are shown below.")
+    if st.button("Find relevant supervisors", type="primary",
+                 disabled=not bool(os.getenv("OPENAI_API_KEY", "").strip())):
+        service = OperationService(path)
+        operation_id = _run(lambda: service.queue("FACULTY_DISCOVERY", application_id=application_id,
+                                                 context_id=context["id"]))
+        if operation_id and _run(lambda: service.launch(operation_id)):
+            st.rerun()
+    _operation_live(path, application_id=application_id)
+    _live_faculty_leads(path, mapping[application_id]["institution"])
+    cards = _run(lambda: orchestrator.professor_cards(application_id, context["id"])) or []
     if not cards:
         st.caption("No reviewed supervisor matches yet. Use Find relevant supervisors to check current records.")
     with connect(path) as db:
@@ -446,6 +637,100 @@ def _people(path: Path, context: dict) -> None:
                         "Email draft prepared")
             else:
                 st.caption("The app will enable email drafting when contact policy and attachments are ready.")
+
+
+@st.fragment(run_every="2s")
+def _live_faculty_leads(path: Path, institution: str) -> None:
+    pending = [item for item in Discovery(path).list_faculty_candidates()
+               if item["review_state"] == "NEW" and item["institution"].casefold() == institution.casefold()]
+    if pending:
+        st.subheader(f"New professor pages ({len(pending)})")
+        st.caption("These are source-backed leads. Check the official page before relying on affiliation or research fit.")
+        for candidate in pending[:20]:
+            with st.container(border=True):
+                st.write(f"**{candidate['name']}** · {candidate['department'] or 'Department unknown'}")
+                if candidate["profile_url"]:
+                    st.link_button("Check official profile", candidate["profile_url"])
+                if st.button("Dismiss lead", key=f"dismiss_faculty_{candidate['id']}"):
+                    if _run(lambda candidate=candidate: Discovery(path).review_faculty_candidate(
+                            candidate["id"], dismiss=True), "Lead dismissed"):
+                        st.rerun()
+
+
+def _universities(path: Path) -> None:
+    st.title("Universities")
+    st.caption("Browse your programme applications by country and university. Unknown countries stay visible.")
+    applications = Ledger(path).list_applications()
+    view = st.radio("Group by", ("Country", "University"), horizontal=True, key="university_group")
+    for group, children in group_programmes(applications, view=view).items():
+        st.subheader(group)
+        for subgroup, items in children.items():
+            with st.expander(f"{subgroup} · {len(items)} application{'s' if len(items) != 1 else ''}"):
+                for item in items:
+                    st.markdown(f"**{html.escape(item['application_name'])}**")
+                    st.caption(" · ".join(filter(None, (item["cycle"], item["status"].replace("_", " ").title(),
+                                                     _qs_caption(item), item["nearest_deadline"]))))
+                    if item["portal_url"]:
+                        st.link_button("Open portal", item["portal_url"])
+    if not applications:
+        st.info("Add a programme to see it here.")
+
+
+def _searches(path: Path, context: dict) -> None:
+    st.title("Searches")
+    st.caption("Keep separate searches for each topic or cycle. Change saved filters and run them again.")
+    _create_intent(path, context, key="simple_saved_intent")
+    service = OperationService(path)
+    for search in service.list_searches():
+        with st.container(border=True):
+            st.markdown(f"### {html.escape(search['title'])}")
+            st.caption(search["intent_text"])
+            with st.form(f"search_edit_{search['id']}"):
+                title = st.text_input("Search name", value=search["title"])
+                criteria = search["criteria"]
+                countries = st.multiselect("Countries", COUNTRY_CHOICES,
+                    default=_country_selections(criteria.get("country_codes") or []))
+                kinds = st.multiselect("Programme types", PROGRAMME_TYPES,
+                                       default=criteria.get("programme_types") or [])
+                funding = st.selectbox("Funding", ("Any", "Funded", "Unknown"),
+                                       index=("Any", "Funded", "Unknown").index(criteria.get("funding") or "Any"))
+                rank_options = ("Any", "Top 25", "Top 50", "Top 100", "Top 150", "Top 200")
+                current_rank = f"Top {criteria['qs_max']}" if criteria.get("qs_max") else "Any"
+                qs = st.selectbox("QS World Rank", rank_options,
+                                  index=rank_options.index(current_rank) if current_rank in rank_options else 0)
+                min_fit = st.slider("Minimum research fit", 0.0, 10.0,
+                                    float(criteria.get("min_research_fit") or 0), 0.5)
+                pages = st.slider("Official pages to check", 1, 12, int(criteria.get("max_pages") or 8))
+                save = st.form_submit_button("Save settings")
+            if save:
+                updated = {**criteria, "country_codes": _country_codes(countries),
+                           "programme_types": kinds, "funding": funding, "max_pages": pages,
+                           "qs_max": int(qs.split()[-1]) if qs != "Any" else None,
+                           "min_research_fit": min_fit}
+                if _run(lambda: service.update_search(search["id"], title=title, criteria=updated),
+                        "Search settings saved"):
+                    st.rerun()
+            left, right = st.columns(2)
+            if left.button("Run again", key=f"rerun_search_{search['id']}"):
+                operation_id = _run(lambda: service.queue("PROGRAMME_SEARCH", search_id=search["id"]))
+                if operation_id and _run(lambda: service.launch(operation_id)):
+                    st.rerun()
+            if right.button("Archive search", key=f"archive_search_{search['id']}"):
+                if _run(lambda: service.archive_search(search["id"])):
+                    st.rerun()
+    with st.expander("Archived searches"):
+        for search in service.list_searches(include_archived=True):
+            if search["status"] == "ARCHIVED":
+                st.write(search["title"])
+                if st.button("Restore search", key=f"restore_search_{search['id']}"):
+                    if _run(lambda search=search: service.archive_search(search["id"], False)):
+                        st.rerun()
+
+
+def _operations(path: Path) -> None:
+    st.title("Operations")
+    st.caption("See current work, stop after the current page, or resume from saved progress.")
+    _operation_live(path)
 
 
 def _documents(path: Path, context: dict) -> None:
@@ -523,7 +808,13 @@ def render_workspace(db_path: Path) -> None:
         _discover(db_path, context)
     elif page == "Applications":
         _applications(db_path, context)
+    elif page == "Universities":
+        _universities(db_path)
     elif page == "People":
         _people(db_path, context)
+    elif page == "Searches":
+        _searches(db_path, context)
+    elif page == "Operations":
+        _operations(db_path)
     else:
         _documents(db_path, context)

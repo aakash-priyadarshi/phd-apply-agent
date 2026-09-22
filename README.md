@@ -33,6 +33,8 @@ Full Railway steps, OIDC, volume backups, Gmail bootstrap, and rollback are in [
 
 For tests, install `requirements-dev.txt` in the same environment, run `python -m phd_agent.auth_dependencies`, `python -m pip check`, and `python -m pytest -q`. Normal tests do not send email. The two Gmail integration tests require explicit environment flags and a test recipient.
 
+The [search operations guide](docs/search-operations.md) explains saved searches, live progress, stop/resume, grouping, and reversible application corrections.
+
 ## Local data
 
 All runtime files are kept outside Git under `data/` by default:
