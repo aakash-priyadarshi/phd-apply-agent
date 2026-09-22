@@ -38,10 +38,11 @@ def legacy_copy(tmp_path):
 
 
 def test_migration_preserves_156_legacy_professors_and_is_idempotent(legacy_copy):
+    """All legacy professors survive migration 13 and repeated migration runs."""
     with connect(legacy_copy) as db:
         old_rows = [tuple(r) for r in db.execute("SELECT * FROM professors ORDER BY id")]
         old_schema = db.execute("SELECT sql FROM sqlite_master WHERE name = 'professors'").fetchone()[0]
-    assert migrate(legacy_copy) == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    assert migrate(legacy_copy) == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]
     assert migrate(legacy_copy) == []
     with connect(legacy_copy) as db:
         assert [tuple(r) for r in db.execute("SELECT * FROM professors ORDER BY id")] == old_rows

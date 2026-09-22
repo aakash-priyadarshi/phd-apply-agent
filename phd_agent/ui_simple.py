@@ -15,6 +15,7 @@ from phd_agent.browser_worker import FormPlanService, companion_command, fields_
 from phd_agent.config import load_settings
 from phd_agent.db import connect
 from phd_agent.discovery import Discovery
+from phd_agent.faculty_research import FacultyResearch
 from phd_agent.ledger import APPLICATION_STATUSES, Ledger
 from phd_agent.operations import OperationService
 from phd_agent.orchestration import ProgrammeOrchestrator
@@ -707,6 +708,7 @@ def _applications(path: Path, context: dict) -> None:
 
 
 def _people(path: Path, context: dict) -> None:
+    """Render professor research cards, filters, and application decisions."""
     orchestrator = ProgrammeOrchestrator(path)
     applications = Ledger(path).list_applications()
     st.title("People")
@@ -733,33 +735,87 @@ def _people(path: Path, context: dict) -> None:
         if operation_id and _run(lambda: service.launch(operation_id)):
             st.rerun()
     _operation_live(path, application_id=application_id)
-    _live_faculty_leads(path, mapping[application_id]["institution"])
+    _live_faculty_leads(path, mapping[application_id]["institution"], application_id, context["id"])
     cards = _run(lambda: orchestrator.professor_cards(application_id, context["id"])) or []
     if not cards:
         st.caption("No reviewed supervisor matches yet. Use Find relevant supervisors to check current records.")
+    research = FacultyResearch(path)
+    topics = sorted({topic.strip() for card in cards for topic in
+                     (card["research_topics"] or "").split(",") if topic.strip()})
+    col_sort, col_topic = st.columns(2)
+    order = col_sort.selectbox("Sort professors", ("Research Fit", "Name", "Most recent research", "Decision state"))
+    topic = col_topic.selectbox("Research topic", ("Any", *topics))
+    col_decision, col_evidence = st.columns(2)
+    decision_filter = col_decision.selectbox("Decision", ("Recommended", "All", "Undecided", "Pursuing", "Rejected", "Contacted"))
+    evidence_filter = col_evidence.selectbox("Research evidence", ("Any", "Has research interests", "Has recent verified work"))
+    minimum = st.slider("Minimum Research Fit", 0.0, 10.0, 0.0, 0.5)
+    states = {"Undecided": "UNDECIDED", "Pursuing": "PURSUE", "Rejected": "REJECTED", "Contacted": "CONTACTED"}
+    visible = [card for card in cards if card["research_fit"] >= minimum
+               and (topic == "Any" or topic.casefold() in (card["research_topics"] or "").casefold())
+               and (decision_filter == "All" or
+                    (decision_filter == "Recommended" and card["decision_state"] not in {"REJECTED", "ARCHIVED"}) or
+                    card["decision_state"] == states.get(decision_filter))
+               and (evidence_filter == "Any" or
+                    evidence_filter == "Has research interests" and bool(card["research_interest_summary"] or card["research_topics"]) or
+                    evidence_filter == "Has recent verified work" and bool(card["recent_work"]))]
+    if order == "Name":
+        visible.sort(key=lambda card: card["name"].casefold())
+    elif order == "Most recent research":
+        visible.sort(key=lambda card: -(card["recent_work"][0]["year"] or 0) if card["recent_work"] else 0)
+    elif order == "Decision state":
+        visible.sort(key=lambda card: (card["decision_state"], -card["research_fit"]))
     with connect(path) as db:
         linked = {row[0] for row in db.execute(
             "SELECT faculty_profile_id FROM application_faculty WHERE application_id=?", (application_id,))}
         packages = [dict(row) for row in db.execute("""SELECT * FROM application_packages
             WHERE application_id=? AND context='FACULTY_OUTREACH' AND status='READY' ORDER BY version_number DESC""",
             (application_id,))]
-    for card in cards:
+    for card in visible:
         with st.container(border=True):
             st.markdown(f"### {html.escape(card['name'])}")
             st.caption(" · ".join(filter(None, (card["department"], card["lab"], card["institution"]))))
-            st.metric("Research fit", f"{card['research_fit']:.1f}/10")
-            st.write(card["research_topics"] or "Research topics need checking.")
+            st.caption(f"{card['decision_state'].replace('_', ' ').title()} · Identity: {card['verification_state']} · Affiliation: {card['affiliation_state']} · Research checked: {card['research_checked_at'] or 'Unknown'} ({card['research_freshness']})")
+            st.metric("Research Fit · alignment aid", f"{card['research_fit']:.1f}/10")
+            st.write(f"**Research interests · {card['research_interest_state']}:**", card["research_interest_summary"] or card["research_topics"] or "Not yet extracted")
+            if card["research_topics"]:
+                st.caption(card["research_topics"])
+            st.write("**Recent verified research**")
+            if card["recent_work"]:
+                for work in card["recent_work"][:2]:
+                    st.write(f"{work['year'] or 'Year unknown'} · {work['title']}")
+            else:
+                st.caption("No verified recent work yet. Official-page listings may need review.")
+                if card["openalex_resolution_state"] == "AMBIGUOUS":
+                    st.caption("Recent publications need author identity review.")
+            for work in card["official_recent_work"][:2]:
+                st.write(f"Official-page listing · Reviewed · {work['year'] or 'Year unknown'} · {work['title']}")
+            for snapshot in card["unreviewed_research"][:1]:
+                for work in snapshot["metadata"].get("recent_research_candidates", [])[:2]:
+                    st.write(f"Official-page listing · NEEDS_REVIEW · {work['year'] or 'Year unknown'} · {work['title']}")
+            if card["current_projects"]:
+                st.write("**Current work · reviewed official source:**", card["current_projects"][0]["title"])
             if card["relevant_applicant_experience"]:
-                st.write("**Your relevant experience:**", card["relevant_applicant_experience"][0])
+                st.write("**Why this matches you · demonstrated:**", card["relevant_applicant_experience"][0])
+            if card["proposed_overlap"]:
+                st.caption("Proposed direction: " + card["proposed_overlap"][0])
+            st.caption(f"Supervision availability: {card['supervision_state']} · Programme contact policy: {card['contact_policy'] or 'Unknown'}")
             if card["unknowns"]:
                 st.caption("Still checking: " + ", ".join(card["unknowns"]))
-            if card["faculty_id"] not in linked:
-                if st.button("Add to application", key=f"simple_person_{card['faculty_id']}"):
-                    evidence = card["evidence_ids"][0] if card["evidence_ids"] else None
-                    if _run(lambda: Discovery(path).link_to_application(
-                            application_id, faculty_id=card["faculty_id"], evidence_id=evidence), "Supervisor added"):
-                        st.rerun()
-            elif packages and card["contact_policy_state"] == "PASS":
+            actions = st.columns(3)
+            if card["decision_state"] not in {"PURSUE", "CONTACTED", "REPLIED"} and actions[0].button("Pursue", key=f"pursue_{application_id}_{card['faculty_id']}"):
+                if _run(lambda: research.decide(application_id, "PURSUE", faculty_id=card["faculty_id"]), "Professor shortlisted"):
+                    st.rerun()
+            if card["decision_state"] != "REJECTED" and actions[1].button("Reject", key=f"reject_{application_id}_{card['faculty_id']}"):
+                if _run(lambda: research.decide(application_id, "REJECTED", faculty_id=card["faculty_id"]), "Professor moved to Rejected"):
+                    st.rerun()
+            if actions[2].button("Research deeper", key=f"research_{application_id}_{card['faculty_id']}",
+                                 disabled=not bool(card["official_profile_url"])):
+                operation_id = _run(lambda: OperationService(path).queue(
+                    "FACULTY_DISCOVERY", application_id=application_id, context_id=context["id"],
+                    faculty_id=card["faculty_id"]))
+                if operation_id and _run(lambda: OperationService(path).launch(operation_id)):
+                    st.rerun()
+            if card["decision_state"] == "PURSUE" and card["verification_state"] == "VERIFIED" and card["faculty_id"] in linked and packages and card["contact_policy_state"] == "PASS":
                 if context.get("trust_level") != "TRUSTED":
                     st.caption("Confirm your profile before drafting a professor email.")
                 elif st.button("Draft email", key=f"simple_email_{card['faculty_id']}", type="primary"):
@@ -767,26 +823,118 @@ def _people(path: Path, context: dict) -> None:
                         card["faculty_id"], application_id, packages[0]["id"],
                         context["profile_version_id"], context["research_track_version_id"]),
                         "Email draft prepared")
-            else:
-                st.caption("The app will enable email drafting when contact policy and attachments are ready.")
+            with st.expander("Research details · evidence and unknowns"):
+                st.caption("Research Fit explains shared evidence; it is not an admission or supervision prediction.")
+                st.caption(f"Affiliation checked: {card['affiliation_checked_at'] or 'Unknown'} · Verified publications checked: {card['publication_checked_at'] or 'Unknown'}")
+                st.write("Matched professor topics:", card["overlapping_terms"] or "Not established")
+                st.write("Matched demonstrated applicant evidence:", card["relevant_applicant_experience"] or "None found")
+                st.write("Proposed direction (separate):", card["proposed_overlap"] or "None found")
+                for index, work in enumerate(card["recent_work"][:8]):
+                    st.write(f"{work['year'] or 'Year unknown'} · {work['title']} · Verified source")
+                    st.link_button("Publication source", work["source_url"], key=f"work_{card['faculty_id']}_{index}")
+                for index, work in enumerate(card["official_recent_work"][:8]):
+                    st.write(f"Official-page listing · Reviewed · {work['year'] or 'Year unknown'} · {work['title']}")
+                    st.link_button("Listing source", work["source_url"], key=f"listing_{card['faculty_id']}_{index}")
+                for index, project in enumerate(card["current_projects"]):
+                    st.write("Current project (reviewed):", project["title"])
+                    st.link_button("Project source", project["source_url"], key=f"project_{card['faculty_id']}_{index}")
+                for snapshot in research.snapshots(faculty_id=card["faculty_id"]):
+                    if snapshot["extraction_state"] == "VERIFIED":
+                        st.caption(f"Reviewed research extraction · {snapshot['checked_at']}")
+                        st.link_button("Research source", snapshot["source_url"], key=f"reviewed_research_{snapshot['id']}")
+                for snapshot in card["unreviewed_research"]:
+                    st.caption(f"Official-page extraction · NEEDS_REVIEW · {snapshot['checked_at']}")
+                    st.write(snapshot["metadata"].get("research_interest_summary") or "Interests not extracted")
+                    for work in snapshot["metadata"].get("recent_research_candidates", [])[:8]:
+                        st.write(f"Possible work · {work['year'] or 'Year unknown'} · {work['title']}")
+                    for project in snapshot["metadata"].get("current_projects", []):
+                        st.write("Possible current project ·", project)
+                    st.link_button("Review official source", snapshot["source_url"], key=f"source_{snapshot['id']}")
+                    if st.button("Confirm extracted research", key=f"confirm_research_{snapshot['id']}"):
+                        if _run(lambda snapshot=snapshot: research.review_snapshot(snapshot["id"], "Applicant")):
+                            st.rerun()
+                st.caption("Still unknown: " + (", ".join(card["unknowns"]) or "None identified"))
+                if card["official_profile_url"]:
+                    st.link_button("Official profile", card["official_profile_url"], key=f"profile_{card['faculty_id']}")
+    rejected = [card for card in cards if card["decision_state"] == "REJECTED"]
+    with st.expander(f"Rejected professors ({len(rejected)})"):
+        for card in rejected:
+            st.write(f"{card['name']} · {card['department'] or 'Department unknown'}")
+            st.caption((card["research_interest_summary"] or card["research_topics"] or "Research not reviewed") +
+                       f" · Rejected {card['decision_at'] or 'date unknown'}")
+            if st.button("Restore", key=f"restore_professor_{application_id}_{card['faculty_id']}"):
+                if _run(lambda card=card: research.decide(application_id, "UNDECIDED", faculty_id=card["faculty_id"])):
+                    st.rerun()
 
 
 @st.fragment(run_every="2s")
-def _live_faculty_leads(path: Path, institution: str) -> None:
+def _live_faculty_leads(path: Path, institution: str, application_id: int, context_id: int) -> None:
+    """Render live pending faculty leads and their application decisions."""
+    research = FacultyResearch(path)
     pending = [item for item in Discovery(path).list_faculty_candidates()
                if item["review_state"] == "NEW" and item["institution"].casefold() == institution.casefold()]
-    if pending:
-        st.subheader(f"New professor pages ({len(pending)})")
+    rejected = []
+    active = []
+    for item in pending:
+        item["decision"] = research.decision(application_id, candidate_id=item["id"])
+        (rejected if item["decision"] and item["decision"]["state"] == "REJECTED" else active).append(item)
+    if active:
+        st.subheader(f"New professor pages ({len(active)})")
         st.caption("These are source-backed leads. Check the official page before relying on affiliation or research fit.")
-        for candidate in pending[:20]:
+        for candidate in active[:20]:
             with st.container(border=True):
                 st.write(f"**{candidate['name']}** · {candidate['department'] or 'Department unknown'}")
+                snapshots = research.snapshots(candidate_id=candidate["id"])
+                snapshot = snapshots[0] if snapshots else None
+                metadata = snapshot["metadata"] if snapshot else {}
+                st.caption(f"Extracted from official page · NEEDS_REVIEW · checked {snapshot['checked_at'] if snapshot else 'unknown'} · {candidate['decision']['state'] if candidate['decision'] else 'UNDECIDED'}")
+                st.write("Research interests:", metadata.get("research_interest_summary") or "Not yet extracted")
+                if metadata.get("research_topics"):
+                    st.caption(" · ".join(metadata["research_topics"]))
+                for work in metadata.get("recent_research_candidates", [])[:2]:
+                    st.write(f"Possible recent work · {work['year'] or 'Year unknown'} · {work['title']}")
+                if metadata.get("research_interest_summary") or metadata.get("research_topics"):
+                    from phd_agent.applicant_context import ApplicantResearchContextService
+                    overlap = ApplicantResearchContextService(path).retrieve(
+                        context_id, "FACULTY_ALIGNMENT",
+                        metadata.get("research_interest_summary") or " ".join(metadata["research_topics"]),
+                        top_k=3, use="exploration", include_proposed=True)
+                    demonstrated = [item.text for item in overlap.items if item.classification == "DEMONSTRATED"]
+                    proposed = [item.text for item in overlap.items if item.classification == "PROPOSED"]
+                    if demonstrated:
+                        st.write("Why it may match you · demonstrated:", demonstrated[0])
+                    if proposed:
+                        st.caption("Proposed direction: " + proposed[0])
+                if snapshot:
+                    with st.expander("Extracted details · needs review"):
+                        st.write("Source excerpt:", metadata.get("source_excerpt") or "No labelled section found")
+                        for project in metadata.get("current_projects", []):
+                            st.write("Possible current project:", project)
+                        st.caption("This extraction does not verify identity or supervision.")
+                actions = st.columns(3)
+                if actions[0].button("Pursue", key=f"pursue_lead_{application_id}_{candidate['id']}"):
+                    if _run(lambda candidate=candidate: research.decide(application_id, "PURSUE", candidate_id=candidate["id"])):
+                        st.rerun()
+                if actions[1].button("Reject", key=f"reject_lead_{application_id}_{candidate['id']}"):
+                    if _run(lambda candidate=candidate: research.decide(application_id, "REJECTED", candidate_id=candidate["id"])):
+                        st.rerun()
+                if actions[2].button("Review professor", key=f"review_lead_{candidate['id']}"):
+                    if _run(lambda candidate=candidate: Discovery(path).review_faculty_candidate(candidate["id"]),
+                            "Professor added for verification"):
+                        st.rerun()
                 if candidate["profile_url"]:
                     st.link_button("Check official profile", candidate["profile_url"])
                 if st.button("Dismiss lead", key=f"dismiss_faculty_{candidate['id']}"):
                     if _run(lambda candidate=candidate: Discovery(path).review_faculty_candidate(
                             candidate["id"], dismiss=True), "Lead dismissed"):
                         st.rerun()
+    with st.expander(f"Rejected professor leads ({len(rejected)})"):
+        for candidate in rejected:
+            st.write(candidate["name"], candidate["department"] or "")
+            st.caption(f"Rejected {candidate['decision']['decided_at']}")
+            if st.button("Restore", key=f"restore_lead_{application_id}_{candidate['id']}"):
+                if _run(lambda candidate=candidate: research.decide(application_id, "UNDECIDED", candidate_id=candidate["id"])):
+                    st.rerun()
 
 
 def _universities(path: Path) -> None:

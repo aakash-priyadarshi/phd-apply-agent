@@ -216,6 +216,7 @@ class OutreachService:
                       profile_version_id: int, track_version_id: int, *,
                       campaign_id: int | None = None, stage: str = "INITIAL",
                       allow_package_id: int | None = None) -> OutreachContext:
+        """Build a reviewed outreach context or raise with all blocking reasons."""
         reasons = []
         try:
             _, track, approved = self.materials._approved_context(profile_version_id, track_version_id, "outreach")
@@ -236,6 +237,8 @@ class OutreachService:
             programme = db.execute("SELECT * FROM programmes WHERE id=?", (app["programme_id"],)).fetchone() if app["programme_id"] else None
             linked = db.execute("SELECT 1 FROM application_faculty WHERE application_id=? AND faculty_profile_id=?",
                                 (application_id, faculty_id)).fetchone()
+            rejected = db.execute("""SELECT 1 FROM faculty_decisions WHERE application_id=?
+                AND faculty_profile_id=? AND state='REJECTED'""", (application_id, faculty_id)).fetchone()
             links = [dict(r) for r in db.execute("""SELECT l.fact_type,e.id,e.retrieved_at,e.verification_state
                 FROM faculty_evidence_links l JOIN source_evidence e ON e.id=l.source_evidence_id
                 WHERE l.faculty_profile_id=?""", (faculty_id,))]
@@ -255,6 +258,8 @@ class OutreachService:
                 (faculty_id,application_id)).fetchone()
         if faculty["verification_state"] != "VERIFIED" or faculty["affiliation_state"] != "CURRENT" or not linked:
             reasons.append("FACULTY_IDENTITY_OR_AFFILIATION_UNVERIFIED")
+        if rejected:
+            reasons.append("PROFESSOR_REJECTED_FOR_APPLICATION")
         if faculty["email_state"] != "VERIFIED" or not faculty["email"] or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", faculty["email"]):
             reasons.append("RECIPIENT_UNVERIFIED")
         if duplicate:

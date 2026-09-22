@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 from phd_agent.db import connect, migrate, transaction, utc_now
+from phd_agent.discovery import canonical_url
+from phd_agent.faculty_research import FacultyResearch, extract_official_research
 from phd_agent.official_search import OfficialSearchResult
 from phd_agent.orchestration import ProgrammeOrchestrator
 from phd_agent.university_enrichment import COUNTRY_NAMES
@@ -109,9 +112,13 @@ class OperationService:
                        ("ARCHIVED" if archived else "ACTIVE", utc_now(), search_id))
 
     def queue(self, operation_type: str, *, search_id: int | None = None,
-              application_id: int | None = None, context_id: int | None = None) -> int:
+              application_id: int | None = None, context_id: int | None = None,
+              faculty_id: int | None = None) -> int:
+        """Validate and enqueue a search, scan, or faculty research operation."""
         if operation_type not in {"PROGRAMME_SEARCH", "FACULTY_DISCOVERY", *SCAN_TYPES}:
             raise ValueError("Unsupported background operation")
+        if faculty_id and operation_type != "FACULTY_DISCOVERY":
+            raise ValueError("Professor research requires a faculty discovery operation")
         if operation_type == "PROGRAMME_SEARCH":
             search = self.get_search(search_id)
             title = "Programme search · " + search["title"]
@@ -135,11 +142,22 @@ class OperationService:
             if not application_id or not context_id:
                 raise ValueError("Choose an application and applicant profile")
             with connect(self.db_path) as db:
-                app = db.execute("SELECT id FROM applications WHERE id=? AND archived_at IS NULL",
+                app = db.execute("""SELECT COALESCE(p.university,o.institution) AS institution
+                    FROM applications a LEFT JOIN programmes p ON p.id=a.programme_id
+                    LEFT JOIN opportunities o ON o.id=a.opportunity_id
+                    WHERE a.id=? AND a.archived_at IS NULL""",
                                  (application_id,)).fetchone()
             if not app:
                 raise ValueError("Application is unavailable")
-            title = "Find professors · application " + str(application_id)
+            if faculty_id:
+                with connect(self.db_path) as db:
+                    faculty = db.execute("SELECT name,institution FROM faculty_profiles WHERE id=?",
+                                         (faculty_id,)).fetchone()
+                if not faculty or faculty["institution"].casefold() != app["institution"].casefold():
+                    raise ValueError("Professor does not belong to this application institution")
+                title = "Research deeper · " + faculty["name"]
+            else:
+                title = "Find professors · application " + str(application_id)
         now = utc_now()
         with transaction(self.db_path) as db:
             active = db.execute("SELECT COUNT(*) FROM operations WHERE status IN ('QUEUED','RUNNING','CANCEL_REQUESTED')").fetchone()[0]
@@ -151,10 +169,13 @@ class OperationService:
                     AND status IN ('QUEUED','RUNNING','CANCEL_REQUESTED','PAUSED')""",
                     (application_id,)).fetchone():
                 raise ValueError("Scan already running")
+            if faculty_id and db.execute("""SELECT 1 FROM operations WHERE faculty_profile_id=?
+                AND status IN ('QUEUED','RUNNING','CANCEL_REQUESTED')""", (faculty_id,)).fetchone():
+                raise ValueError("Research is already running for this professor")
             operation_id = db.execute("""INSERT INTO operations
-                (operation_type,title,status,search_id,application_id,context_id,created_at,updated_at)
-                VALUES(?,?,'QUEUED',?,?,?,?,?)""",
-                (operation_type, title, search_id, application_id, context_id, now, now)).lastrowid
+                (operation_type,title,status,search_id,application_id,context_id,faculty_profile_id,created_at,updated_at)
+                VALUES(?,?,'QUEUED',?,?,?,?,?,?)""",
+                (operation_type, title, search_id, application_id, context_id, faculty_id, now, now)).lastrowid
             self._event(db, operation_id, "Queued by applicant")
         return operation_id
 
@@ -271,8 +292,9 @@ class OperationService:
     def _progress(self, operation_id: int, *, stage: str, item: str = "", completed: int | None = None,
                   total: int | None = None, checkpoint: dict | None = None, model: str | None = None,
                   event: str | None = None) -> bool:
+        """Persist progress for a running operation and report whether it may continue."""
         with transaction(self.db_path) as db:
-            row = db.execute("SELECT status,search_id,application_id FROM operations WHERE id=?", (operation_id,)).fetchone()
+            row = db.execute("SELECT status,search_id,application_id,faculty_profile_id FROM operations WHERE id=?", (operation_id,)).fetchone()
             if not row or row["status"] != "RUNNING":
                 return False
             results = None
@@ -280,6 +302,9 @@ class OperationService:
                 results = db.execute("""SELECT COUNT(*) FROM programme_candidates c
                     JOIN search_sessions s ON s.intent_id=c.intent_id
                     WHERE s.id=? AND c.archived_at IS NULL""", (row["search_id"],)).fetchone()[0]
+            elif row["faculty_profile_id"]:
+                results = db.execute("SELECT COUNT(*) FROM faculty_research_snapshots WHERE faculty_profile_id=?",
+                                     (row["faculty_profile_id"],)).fetchone()[0]
             db.execute("""UPDATE operations SET stage=?,current_item=?,
                 completed_units=COALESCE(?,completed_units),total_units=COALESCE(?,total_units),
                 checkpoint_json=COALESCE(?,checkpoint_json),model_route=COALESCE(?,model_route),
@@ -291,8 +316,9 @@ class OperationService:
         return True
 
     def _finish(self, operation_id: int, status: str, *, error: str | None = None, results: int | None = None) -> None:
+        """Finalize an operation with its status, result count, and optional error."""
         with transaction(self.db_path) as db:
-            row = db.execute("SELECT status,search_id,application_id,operation_type FROM operations WHERE id=?", (operation_id,)).fetchone()
+            row = db.execute("SELECT status,search_id,application_id,operation_type,faculty_profile_id FROM operations WHERE id=?", (operation_id,)).fetchone()
             if not row:
                 return
             if row["status"] == "INTERRUPTED":
@@ -310,6 +336,9 @@ class OperationService:
                 results = db.execute("""SELECT COUNT(*) FROM programme_candidates c
                     JOIN search_sessions s ON s.intent_id=c.intent_id
                     WHERE s.id=? AND c.archived_at IS NULL""", (row["search_id"],)).fetchone()[0]
+            elif results is None and row["faculty_profile_id"]:
+                results = db.execute("SELECT COUNT(*) FROM faculty_research_snapshots WHERE faculty_profile_id=?",
+                                     (row["faculty_profile_id"],)).fetchone()[0]
             elif results is None and row["application_id"]:
                 results = db.execute("""SELECT COUNT(*) FROM faculty_candidates fc
                     JOIN source_catalogue sc ON sc.id=fc.source_catalogue_id
@@ -326,6 +355,7 @@ class OperationService:
             self._event(db, operation_id, f"{status.title()}: {results} {label}")
 
     def run(self, operation_id: int, *, provider=None, api_key: str | None = None, fetcher=None) -> None:
+        """Run a queued operation and persist its terminal outcome."""
         if not self._claim(operation_id):
             return
         operation = self.get(operation_id)
@@ -337,7 +367,9 @@ class OperationService:
                 ApplicationRescan(self.db_path).execute(operation_id, self, fetcher=fetcher)
                 return
             orchestrator = ProgrammeOrchestrator(self.db_path)
-            if operation["operation_type"] == "PROGRAMME_SEARCH":
+            if operation["faculty_profile_id"]:
+                self._research(operation_id, operation, orchestrator, fetcher=fetcher)
+            elif operation["operation_type"] == "PROGRAMME_SEARCH":
                 search = self.get_search(operation["search_id"])
                 if not checkpoint.get("ledger_done"):
                     if not self._progress(operation_id, stage="Checking saved programmes", event="Checking existing programme records"):
@@ -396,3 +428,67 @@ class OperationService:
 
         discover(saved_hits=saved_hits, on_hits=on_hits, before_hit=before_hit,
                  after_hit=after_hit, start_index=checkpoint.get("index", 0), max_hits=budget)
+
+    def _research(self, operation_id: int, operation: dict, orchestrator: ProgrammeOrchestrator,
+                  *, fetcher=None) -> None:
+        """Collect reviewable research from identity-matched official faculty pages."""
+        from urllib.parse import urljoin, urlparse
+        from bs4 import BeautifulSoup
+
+        with connect(self.db_path) as db:
+            professor = db.execute("SELECT * FROM faculty_profiles WHERE id=?",
+                                   (operation["faculty_profile_id"],)).fetchone()
+        if not professor or not professor["official_profile_url"]:
+            raise ValueError("Professor needs an official profile URL")
+        checkpoint = operation["checkpoint"]
+        pages = checkpoint.get("pages") or list(dict.fromkeys(
+            url for url in (professor["official_profile_url"], professor["lab_url"]) if url))
+        checkpoint["pages"] = pages
+        research = FacultyResearch(self.db_path)
+        index = checkpoint.get("index", 0)
+        while index < min(len(pages), 5):
+            url = pages[index]
+            if not self._progress(operation_id, stage="Checking official research", item=url,
+                                  completed=index, total=len(pages), checkpoint=checkpoint):
+                return
+            acquisition = fetcher(url) if fetcher else orchestrator.acquire_page(url)
+            if (acquisition.status == "ACQUIRED" and len(acquisition.text or "") >= 300
+                    and professor["name"].casefold() in acquisition.text.casefold()
+                    and urlparse(acquisition.url).hostname == urlparse(url).hostname):
+                evidence_id = orchestrator.ledger.create_evidence(
+                    url, "FACULTY", " ".join(acquisition.text.split())[:12000], "UNVERIFIED")
+                research.save_snapshot(url, evidence_id,
+                                       extract_official_research(acquisition.text, acquisition.html),
+                                       faculty_id=professor["id"])
+                if index == 0 and acquisition.html:
+                    base_host = urlparse(url).hostname
+                    soup = BeautifulSoup(acquisition.html, "html.parser")
+                    for link in soup.find_all("a", href=True):
+                        if not re.search(r"\b(projects?|research|lab)\b", link.get_text(" ", strip=True), re.I):
+                            continue
+                        related = urljoin(url, link["href"])
+                        if (urlparse(related).scheme != "https" or
+                                urlparse(related).hostname != base_host):
+                            continue
+                        related = canonical_url(related)
+                        if related not in pages and len(pages) < 5:
+                            pages.append(related)
+            else:
+                self._progress(operation_id, stage="Checking official research", item=url,
+                               event="Page needs professor identity review; no research attributed")
+            checkpoint["index"] = index + 1
+            if not self._progress(operation_id, stage="Checking official research", item=url,
+                                  completed=index + 1, total=len(pages), checkpoint=checkpoint,
+                                  event=f"Checked official research page {index + 1}/{len(pages)}"):
+                return
+            index += 1
+        if not self._progress(operation_id, stage="Checking reviewed publications", checkpoint=checkpoint):
+            return
+        with connect(self.db_path) as db:
+            verified = db.execute("""SELECT COUNT(*) FROM publications p JOIN source_evidence e
+                ON e.id=p.source_evidence_id WHERE p.faculty_profile_id=?
+                AND e.verification_state='VERIFIED'""", (professor["id"],)).fetchone()[0]
+        if not self._progress(operation_id, stage="Checking applicant alignment", checkpoint=checkpoint,
+                              event=f"{verified} previously verified publications available; external author identity remains manual"):
+            return
+        orchestrator.professor_cards(operation["application_id"], operation["context_id"])

@@ -344,6 +344,7 @@ def _applications(path: Path, context: dict) -> None:
 
 
 def _professors(path: Path, context: dict, reviewer: str) -> None:
+    """Render the legacy professor workspace and its review controls."""
     orchestrator = ProgrammeOrchestrator(path)
     apps = Ledger(path).list_applications()
     st.header("Professors & Messages")
@@ -407,7 +408,8 @@ def _professors(path: Path, context: dict, reviewer: str) -> None:
             c3.metric("Unknowns", len(card["unknowns"]))
             st.write("**Professor research:**", card["research_topics"] or "UNKNOWN")
             if card["recent_work"]:
-                st.write("**Recent verified work:**", "; ".join(card["recent_work"]))
+                st.write("**Recent verified work:**", "; ".join(
+                    item["title"] if isinstance(item, dict) else item for item in card["recent_work"]))
             st.write("**Relevant applicant CV experience:**")
             for item in card["relevant_applicant_experience"] or ["No demonstrated overlap retrieved"]:
                 st.write("•", item)
