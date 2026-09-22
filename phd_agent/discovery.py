@@ -318,7 +318,20 @@ class Discovery:
                     (faculty_profile_id,fact_type,source_evidence_id,linked_at)
                     VALUES(?,?,?,?)""", (faculty_id, "IDENTITY", evidence_id, now))
             if candidate_id:
-                db.execute("UPDATE faculty_candidates SET review_state='REVIEWED' WHERE id=?", (candidate_id,))
+                db.execute("""UPDATE faculty_candidates SET review_state='REVIEWED',faculty_profile_id=?
+                    WHERE id=?""", (faculty_id, candidate_id))
+                db.execute("UPDATE faculty_research_snapshots SET faculty_profile_id=? WHERE candidate_id=?",
+                           (faculty_id, candidate_id))
+                for decision in db.execute("SELECT * FROM faculty_decisions WHERE candidate_id=?",
+                                           (candidate_id,)).fetchall():
+                    if not db.execute("""SELECT 1 FROM faculty_decisions WHERE application_id=?
+                        AND faculty_profile_id=?""", (decision["application_id"], faculty_id)).fetchone():
+                        db.execute("UPDATE faculty_decisions SET faculty_profile_id=? WHERE id=?",
+                                   (faculty_id, decision["id"]))
+                    if decision["state"] == "PURSUE":
+                        db.execute("""INSERT OR IGNORE INTO application_faculty
+                            (application_id,faculty_profile_id,linked_at) VALUES(?,?,?)""",
+                            (decision["application_id"], faculty_id, now))
             return faculty_id
 
     def verify_faculty(self, faculty_id: int, state: str, *, evidence_by_fact: dict[str, int],

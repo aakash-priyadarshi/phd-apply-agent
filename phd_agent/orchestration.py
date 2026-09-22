@@ -23,6 +23,7 @@ from phd_agent.browser_worker import (
 )
 from phd_agent.db import connect, migrate, transaction, utc_now
 from phd_agent.discovery import Discovery, canonical_url, freshness
+from phd_agent.faculty_research import FacultyResearch, extract_official_research
 from phd_agent.ledger import Ledger
 from phd_agent.matching import contact_policy_state
 from phd_agent.model_router import ModelRouter
@@ -984,42 +985,108 @@ class ProgrammeOrchestrator:
             programme = db.execute("SELECT * FROM programmes WHERE id=?", (app["programme_id"],)).fetchone() if app["programme_id"] else None
             opportunity = db.execute("SELECT * FROM opportunities WHERE id=?", (app["opportunity_id"],)).fetchone() if app["opportunity_id"] else None
             institution = programme["university"] if programme else opportunity["institution"] if opportunity else ""
-            faculty = [dict(row) for row in db.execute("""SELECT * FROM faculty_profiles
-                WHERE lower(institution)=lower(?) AND verification_state IN ('VERIFIED','PARTIALLY_VERIFIED')
-                ORDER BY verification_state,name""", (institution,))]
+            faculty = [dict(row) for row in db.execute("""SELECT f.* FROM faculty_profiles f
+                WHERE lower(f.institution)=lower(?) AND f.verification_state NOT IN ('INACTIVE','CONFLICT')
+                AND (f.verification_state IN ('VERIFIED','PARTIALLY_VERIFIED')
+                     OR EXISTS (SELECT 1 FROM faculty_candidates c WHERE c.faculty_profile_id=f.id)
+                     OR EXISTS (SELECT 1 FROM application_faculty af WHERE af.faculty_profile_id=f.id
+                                AND af.application_id=?))
+                ORDER BY f.verification_state,f.name""", (institution, application_id))]
+        research = FacultyResearch(self.db_path)
         cards = []
         for professor in faculty:
-            detail_text = " ".join(filter(None, (professor["research_topics"], professor["lab"], professor["department"])))
+            snapshots = research.snapshots(faculty_id=professor["id"])
+            reviewed = [item for item in snapshots if item["extraction_state"] == "VERIFIED"]
+            interest = next((item for item in reviewed if item["metadata"].get("research_interest_summary")), None)
+            preview = interest or next((item for item in snapshots if item["metadata"].get("research_interest_summary")), None)
+            projects = [(project, item) for item in reviewed for project in item["metadata"].get("current_projects", [])]
+            official_works = [(work, item) for item in reviewed
+                              for work in item["metadata"].get("recent_research_candidates", [])]
+            detail_text = " ".join(filter(None, (professor["research_topics"], professor["lab"],
+                                                  professor["department"], preview["metadata"]["research_interest_summary"] if preview else "")))
             with connect(self.db_path) as db:
-                publications = [dict(row) for row in db.execute("""SELECT p.*,e.retrieved_at,e.verification_state
+                publications = [dict(row) for row in db.execute("""SELECT p.*,e.retrieved_at,e.verification_state,
+                    e.canonical_url AS source_url
                     FROM publications p JOIN source_evidence e ON e.id=p.source_evidence_id
-                    WHERE p.faculty_profile_id=? ORDER BY p.year DESC,p.id DESC LIMIT 5""", (professor["id"],))]
+                    WHERE p.faculty_profile_id=? ORDER BY p.year DESC,p.id DESC LIMIT 8""", (professor["id"],))]
                 links = [dict(row) for row in db.execute("""SELECT l.fact_type,e.id,e.retrieved_at,e.verification_state
                     FROM faculty_evidence_links l JOIN source_evidence e ON e.id=l.source_evidence_id
                     WHERE l.faculty_profile_id=?""", (professor["id"],))]
+                contacted = db.execute("""SELECT m.status FROM outreach_messages m
+                    JOIN outreach_packages p ON p.id=m.package_id
+                    WHERE p.application_id=? AND p.faculty_profile_id=?
+                    AND m.status IN ('SENT','REPLIED') ORDER BY m.id DESC LIMIT 1""",
+                    (application_id, professor["id"])).fetchone()
+                replied = db.execute("""SELECT 1 FROM reply_events WHERE application_id=?
+                    AND faculty_profile_id=? AND direction='INBOUND' LIMIT 1""",
+                    (application_id, professor["id"])).fetchone()
             verified_publications = [paper for paper in publications if paper["verification_state"] == "VERIFIED"]
+            verified_titles = {paper["title"].casefold() for paper in verified_publications}
+            verified_topics = any(link["fact_type"] == "TOPICS" and link["verification_state"] == "VERIFIED"
+                                  for link in links)
             query = detail_text + " " + " ".join((paper["title"] + " " + (paper["abstract_text"] or ""))
                                                     for paper in verified_publications)
+            query = query.strip() or professor["name"]
             retrieval = self.contexts.retrieve(context_id, "FACULTY_ALIGNMENT", query,
                                                top_k=3, use="exploration", include_proposed=True)
             demonstrated = [item for item in retrieval.items if item.classification == "DEMONSTRATED"]
             proposed = [item for item in retrieval.items if item.classification == "PROPOSED"]
             evidence_ids = sorted({link["id"] for link in links if link["verification_state"] == "VERIFIED"})
             unknowns = []
+            if professor["verification_state"] not in {"VERIFIED", "PARTIALLY_VERIFIED"}: unknowns.append("Faculty identity review")
             if professor["affiliation_state"] != "CURRENT": unknowns.append("Current affiliation")
             if professor["supervision_state"] == "UNKNOWN": unknowns.append("Current supervision availability")
             if not verified_publications: unknowns.append("Recent verified publications")
             if not professor["email"] or professor["email_state"] != "VERIFIED": unknowns.append("Verified email")
             score = round(min(10, sum(item.score for item in retrieval.items) / max(1, len(retrieval.items)) / 2), 1)
+            decision = research.decision(application_id, faculty_id=professor["id"])
+            decision_state = decision["state"] if decision else "UNDECIDED"
+            if decision_state not in {"REJECTED", "ARCHIVED"}:
+                if replied or (contacted and contacted["status"] == "REPLIED"):
+                    decision_state = "REPLIED"
+                elif contacted:
+                    decision_state = "CONTACTED"
+            recent_work = [{"title": paper["title"], "year": paper["year"], "type": "PUBLICATION",
+                            "verification_state": "VERIFIED", "source_evidence_id": paper["source_evidence_id"],
+                            "source_url": paper["source_url"], "checked_at": paper["retrieved_at"]}
+                           for paper in verified_publications]
             cards.append({
                 "faculty_id": professor["id"], "name": professor["name"],
                 "institution": professor["institution"], "department": professor["department"],
-                "lab": professor["lab"], "research_topics": professor["research_topics"],
-                "recent_work": [paper["title"] for paper in verified_publications[:3]],
+                "lab": professor["lab"] or (preview["metadata"].get("lab") if preview else None),
+                "research_topics": professor["research_topics"] or (", ".join(preview["metadata"].get("research_topics", [])) if preview else None),
+                "recent_work": recent_work, "recent_work_titles": [paper["title"] for paper in verified_publications[:3]],
+                "official_recent_work": [{**work, "verification_state": "REVIEWED_LISTING",
+                                          "source_url": item["source_url"],
+                                          "source_evidence_id": item["source_evidence_id"]}
+                                         for work, item in official_works
+                                         if work["title"].casefold() not in verified_titles][:8],
+                "research_interest_summary": preview["metadata"]["research_interest_summary"] if preview else "",
+                "research_interest_state": "REVIEWED" if interest else "VERIFIED" if verified_topics else "NEEDS_REVIEW",
+                "research_interest_evidence_id": preview["source_evidence_id"] if preview else None,
+                "current_projects": [{"title": title, "source_url": item["source_url"],
+                                      "source_evidence_id": item["source_evidence_id"],
+                                      "checked_at": item["checked_at"]} for title, item in projects[:6]],
+                "unreviewed_research": [item for item in snapshots if item["extraction_state"] != "VERIFIED"],
                 "relevant_applicant_experience": [item.text for item in demonstrated],
                 "proposed_overlap": [item.text for item in proposed],
                 "overlapping_terms": sorted({term for item in retrieval.items for term in item.matched_terms}),
+                "demonstrated_terms": sorted({term for item in demonstrated for term in item.matched_terms}),
+                "proposed_terms": sorted({term for item in proposed for term in item.matched_terms}),
                 "research_fit": score, "fit_is_admission_probability": False,
+                "decision_state": decision_state,
+                "decision_at": decision["decided_at"] if decision else None,
+                "official_profile_url": professor["official_profile_url"],
+                "verification_state": professor["verification_state"],
+                "affiliation_state": professor["affiliation_state"],
+                "supervision_state": professor["supervision_state"],
+                "last_checked_at": professor["last_checked_at"],
+                "research_checked_at": snapshots[0]["checked_at"] if snapshots else None,
+                "research_freshness": freshness(snapshots[0]["checked_at"], "PUBLICATION") if snapshots else "UNKNOWN",
+                "affiliation_checked_at": max((link["retrieved_at"] for link in links
+                                                 if link["fact_type"] == "AFFILIATION" and link["verification_state"] == "VERIFIED"), default=None),
+                "publication_checked_at": recent_work[0]["checked_at"] if recent_work else None,
+                "openalex_resolution_state": professor["openalex_resolution_state"],
                 "contact_policy": opportunity["contact_policy"] if opportunity else None,
                 "contact_policy_state": contact_policy_state(opportunity["contact_policy"] if opportunity else None),
                 "application_readiness": "REVIEW_REQUIRED" if unknowns else "READY_FOR_POLICY_CHECK",
@@ -1088,11 +1155,22 @@ class ProgrammeOrchestrator:
             )
             with connect(self.db_path) as db:
                 existing_candidate = db.execute("""SELECT id,source_evidence_id FROM faculty_candidates
-                    WHERE source_catalogue_id=? AND lower(name)=lower(?) AND review_state='NEW'""",
+                    WHERE source_catalogue_id=? AND lower(name)=lower(?) ORDER BY id LIMIT 1""",
                     (source_id, hit.person_name)).fetchone()
             if existing_candidate:
                 candidate_id = existing_candidate["id"]
-                evidence_id = existing_candidate["source_evidence_id"]
+                with connect(self.db_path) as db:
+                    state = db.execute("SELECT review_state FROM faculty_candidates WHERE id=?",
+                                       (candidate_id,)).fetchone()[0]
+                if state != "NEW":
+                    if after_hit:
+                        after_hit(index + 1, len(hits), hit)
+                    continue
+                evidence_id = self.ledger.create_evidence(
+                    hit.official_url, hit.source_kind, _clean_text(acquisition.text)[:12000], "UNVERIFIED")
+                with transaction(self.db_path) as db:
+                    db.execute("UPDATE faculty_candidates SET source_evidence_id=? WHERE id=?",
+                               (evidence_id, candidate_id))
             else:
                 evidence_id = self.ledger.create_evidence(
                     hit.official_url, hit.source_kind, _clean_text(acquisition.text)[:12000], "UNVERIFIED")
@@ -1100,12 +1178,16 @@ class ProgrammeOrchestrator:
                     source_id, hit.person_name, evidence_id, profile_url=hit.official_url,
                     department=hit.department,
                 )
+            extracted = extract_official_research(acquisition.text, acquisition.html)
+            FacultyResearch(self.db_path).save_snapshot(hit.official_url, evidence_id, extracted,
+                                                        candidate_id=candidate_id)
             queued.append({
                 "candidate_id": candidate_id, "name": hit.person_name, "institution": institution,
                 "department": hit.department, "official_url": hit.official_url,
                 "relevance_reason": hit.relevance_reason,
                 "relevant_applicant_experience": [item.text for item in retrieval.items],
                 "evidence_id": evidence_id, "verification_state": "NEEDS_REVIEW",
+                "research": extracted,
                 "provider": route.provider, "model": route.model,
             })
             if after_hit:

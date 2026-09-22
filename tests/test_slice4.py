@@ -12,6 +12,7 @@ import pytest
 
 from phd_agent.db import connect, transaction, utc_now
 from phd_agent.discovery import Discovery
+from phd_agent.faculty_research import FacultyResearch
 from phd_agent.documents import DocumentVault
 from phd_agent.gmail_gateway import GmailGateway
 from phd_agent.ledger import Ledger
@@ -105,6 +106,14 @@ def test_context_grounded_draft_quality_and_immutable_package(case):
     assert outreach.get_package(package)["status"] == "APPROVED"
     with pytest.raises(OutreachBlocked, match="DUPLICATE_ACTIVE_OUTREACH"):
         outreach.prepare(c["faculty"],c["app"],c["document_package"],c["profile_version"],c["track_version"])
+
+
+def test_rejected_professor_cannot_be_prepared_for_outreach(case):
+    c = case
+    FacultyResearch(c["path"]).decide(c["app"], "REJECTED", faculty_id=c["faculty"])
+    with pytest.raises(OutreachBlocked, match="PROFESSOR_REJECTED_FOR_APPLICATION"):
+        c["outreach"].prepare(c["faculty"], c["app"], c["document_package"],
+                              c["profile_version"], c["track_version"])
 
 
 def test_quality_blocks_wrong_professor_institution_claims_and_attachment_mentions(case):
