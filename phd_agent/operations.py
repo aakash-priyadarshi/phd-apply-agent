@@ -80,18 +80,26 @@ class OperationService:
         return [self.get_search(search_id) for search_id in ids]
 
     def update_search(self, search_id: int, *, title: str, criteria: dict) -> None:
-        current = self.get_search(search_id)
         if not title.strip():
             raise ValueError("Name this search")
         if set(criteria) - {"country_codes", "programme_types", "funding", "qs_max", "min_research_fit", "max_pages"}:
             raise ValueError("Unsupported search criteria")
         if not 1 <= int(criteria.get("max_pages") or MAX_SEARCH_PAGES) <= MAX_SEARCH_PAGES:
             raise ValueError("Search page budget must be between 1 and 12")
+        updated_title = title.strip()
+        updated_criteria = json.dumps(criteria)
         with transaction(self.db_path) as db:
+            current = db.execute("SELECT title,criteria_json FROM search_sessions WHERE id=?",
+                                 (search_id,)).fetchone()
+            if not current:
+                raise ValueError("Search does not exist")
             db.execute("UPDATE search_sessions SET title=?,criteria_json=?,updated_at=? WHERE id=?",
-                       (title.strip(), json.dumps(criteria), utc_now(), search_id))
+                       (updated_title, updated_criteria, utc_now(), search_id))
             db.execute("""INSERT INTO record_change_events(entity_type,entity_id,action,changes_json,created_at)
-                VALUES('SEARCH',?,'EDIT',?,?)""", (search_id, json.dumps({"previous_title": current["title"]}), utc_now()))
+                VALUES('SEARCH',?,'EDIT',?,?)""", (search_id, json.dumps({
+                    "title": {"before": current["title"], "after": updated_title},
+                    "criteria_json": {"before": current["criteria_json"], "after": updated_criteria},
+                }), utc_now()))
 
     def archive_search(self, search_id: int, archived: bool = True) -> None:
         self.get_search(search_id)

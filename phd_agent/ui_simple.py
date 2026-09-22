@@ -459,7 +459,9 @@ def _live_results(path: Path, search: dict | None, extra: dict, kinds: list[str]
                 for candidate in items:
                     _candidate(orchestrator, candidate)
     with st.expander("Removed results"):
-        archived = [item for item in orchestrator.list_candidates(states=("NEW", "SHORTLISTED", "REJECTED"),
+        archived = [item for item in orchestrator.list_candidates(
+                    intent_id=search["intent_id"] if search else None,
+                    states=("NEW", "SHORTLISTED", "REJECTED"),
                     include_archived=True) if item.get("archived_at")]
         for item in archived:
             st.write(item["payload"].get("programme") or item["canonical_url"])

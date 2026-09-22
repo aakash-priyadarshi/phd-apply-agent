@@ -55,31 +55,36 @@ class Ledger:
         migrate(self.db_path)
         self.storage = LocalDocumentStorage(document_root or self.db_path.parent / "documents")
 
-    def _insert(self, table: str, values: dict) -> int:
+    def _insert(self, table: str, values: dict, *, db=None) -> int:
         columns = ", ".join(values)
         placeholders = ", ".join("?" for _ in values)
-        with transaction(self.db_path) as db:
-            cursor = db.execute(
-                f"INSERT INTO {table} ({columns}) VALUES ({placeholders})", tuple(values.values())
-            )
-            return cursor.lastrowid
+        if db is None:
+            with transaction(self.db_path) as owned:
+                return self._insert(table, values, db=owned)
+        cursor = db.execute(
+            f"INSERT INTO {table} ({columns}) VALUES ({placeholders})", tuple(values.values())
+        )
+        return cursor.lastrowid
 
-    def _update(self, table: str, row_id: int, changes: dict, allowed: set[str]) -> None:
+    def _update(self, table: str, row_id: int, changes: dict, allowed: set[str], *, db=None) -> None:
         unexpected = set(changes) - allowed
         if unexpected:
             raise ValueError(f"Unsupported {table} fields: {sorted(unexpected)}")
         if not changes:
             return
-        if table in {"programmes", "opportunities", "applications", "requirements", "application_referees"}:
-            changes["updated_at"] = utc_now()
-        assignments = ", ".join(f"{name} = ?" for name in changes)
-        with transaction(self.db_path) as db:
-            cursor = db.execute(
-                f"UPDATE {table} SET {assignments} WHERE id = ?",
-                (*changes.values(), row_id),
-            )
-            if cursor.rowcount != 1:
-                raise ValueError(f"{table} record {row_id} does not exist")
+        if db is None:
+            with transaction(self.db_path) as owned:
+                return self._update(table, row_id, changes, allowed, db=owned)
+        updates = {**changes, "updated_at": utc_now()} if table in {
+            "programmes", "opportunities", "applications", "requirements", "application_referees"
+        } else changes
+        assignments = ", ".join(f"{name} = ?" for name in updates)
+        cursor = db.execute(
+            f"UPDATE {table} SET {assignments} WHERE id = ?",
+            (*updates.values(), row_id),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError(f"{table} record {row_id} does not exist")
 
     def get(self, table: str, row_id: int) -> dict | None:
         if table not in {
@@ -93,7 +98,7 @@ class Ledger:
     def create_evidence(
         self, canonical_url: str, source_type: str, relevant_excerpt: str = "",
         verification_state: str = "UNVERIFIED", retrieved_at: str | None = None,
-        last_manually_verified_at: str | None = None,
+        last_manually_verified_at: str | None = None, *, db=None,
     ) -> int:
         if verification_state not in {"UNVERIFIED", "VERIFIED", "NEEDS_REVIEW"}:
             raise ValueError("Invalid verification state")
@@ -108,7 +113,7 @@ class Ledger:
             "verification_state": verification_state,
             "last_manually_verified_at": last_manually_verified_at or (now if verification_state == "VERIFIED" else None),
             "created_at": now,
-        })
+        }, db=db)
 
     def list_evidence(self) -> list[dict]:
         with connect(self.db_path) as db:
@@ -131,7 +136,7 @@ class Ledger:
             **details, "created_at": now, "updated_at": now,
         })
 
-    def update_programme(self, programme_id: int, **changes) -> None:
+    def update_programme(self, programme_id: int, *, db=None, **changes) -> None:
         self._update("programmes", programme_id, changes, {
             "university", "programme_name", "department", "degree_type", "cycle",
             "programme_url", "admissions_url", "portal_url", "notes",
@@ -139,7 +144,7 @@ class Ledger:
             "qs_ranking_system", "qs_ranking_year", "qs_rank_display", "qs_rank_numeric",
             "qs_rank_band_low", "qs_rank_band_high", "qs_source_url", "qs_source_evidence_id",
             "qs_checked_at", "qs_match_state",
-        })
+        }, db=db)
 
     def list_programmes(self) -> list[dict]:
         with connect(self.db_path) as db:
@@ -203,11 +208,16 @@ class Ledger:
             "created_at": now, "updated_at": now,
         })
 
-    def update_application(self, application_id: int, **changes) -> None:
+    def update_application(self, application_id: int, *, db=None, **changes) -> None:
         if "status" in changes and changes["status"] not in APPLICATION_STATUSES:
             raise ValueError("Invalid application status")
         if changes.get("status") == "READY_TO_SUBMIT":
-            with connect(self.db_path) as db:
+            if db is None:
+                with connect(self.db_path) as reader:
+                    ready = reader.execute("""SELECT 1 FROM application_packages WHERE application_id=?
+                        AND context='FORMAL_APPLICATION' AND status='READY' ORDER BY version_number DESC LIMIT 1""",
+                        (application_id,)).fetchone()
+            else:
                 ready = db.execute("""SELECT 1 FROM application_packages WHERE application_id=?
                     AND context='FORMAL_APPLICATION' AND status='READY' ORDER BY version_number DESC LIMIT 1""",
                     (application_id,)).fetchone()
@@ -216,7 +226,7 @@ class Ledger:
         self._update("applications", application_id, changes, {
             "cycle", "status", "portal_url", "funding_state", "eligibility_state",
             "supervisor_contact_state", "next_action", "owner_notes",
-        })
+        }, db=db)
 
     def delete_application(self, application_id: int) -> None:
         with transaction(self.db_path) as db:
@@ -240,7 +250,7 @@ class Ledger:
 
     def create_deadline(
         self, application_id: int, deadline_type: str, due_at: str,
-        source_evidence_id: int, **details,
+        source_evidence_id: int, *, db=None, **details,
     ) -> int:
         if deadline_type not in DEADLINE_TYPES:
             raise ValueError("Invalid deadline type")
@@ -251,7 +261,7 @@ class Ledger:
             "application_id": application_id, "deadline_type": deadline_type,
             "due_at": _date_or_datetime(due_at, "Deadline"), "source_evidence_id": source_evidence_id,
             **details, "created_at": utc_now(),
-        })
+        }, db=db)
 
     def list_deadlines(self, application_id: int) -> list[dict]:
         with connect(self.db_path) as db:
@@ -445,14 +455,14 @@ class Ledger:
                 LEFT JOIN programmes p ON p.id = a.programme_id
                 LEFT JOIN opportunities o ON o.id = a.opportunity_id
                 JOIN source_evidence e ON e.id = d.source_evidence_id
-                WHERE substr(d.due_at, 1, 10) BETWEEN ? AND ?
+                WHERE a.archived_at IS NULL AND substr(d.due_at, 1, 10) BETWEEN ? AND ?
                 ORDER BY d.due_at LIMIT 50""", (today, cutoff))]
             overdue = [dict(r) for r in db.execute("""
                 SELECT t.*, COALESCE(p.university, o.institution) AS institution
                 FROM application_tasks t JOIN applications a ON a.id = t.application_id
                 LEFT JOIN programmes p ON p.id = a.programme_id
                 LEFT JOIN opportunities o ON o.id = a.opportunity_id
-                WHERE t.due_at IS NOT NULL AND substr(t.due_at, 1, 10) < ?
+                WHERE a.archived_at IS NULL AND t.due_at IS NOT NULL AND substr(t.due_at, 1, 10) < ?
                   AND t.status NOT IN ('DONE','CANCELLED')
                 ORDER BY t.due_at""", (today,))]
             documents = [dict(r) for r in db.execute("""

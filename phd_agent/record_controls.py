@@ -8,8 +8,7 @@ from pathlib import Path
 
 from phd_agent.db import connect, migrate, transaction, utc_now
 from phd_agent.ledger import Ledger
-from phd_agent.university_enrichment import resolve_country_label
-from phd_agent.university_enrichment import candidate_matches_filters, funding_looks_funded
+from phd_agent.university_enrichment import candidate_matches_filters, funding_looks_funded, resolve_country_label
 
 
 PROGRAMME_TYPES = (
@@ -32,6 +31,8 @@ def programme_type(title: str, degree: str | None = None) -> str:
         return "RA_TO_PHD"
     if "project" in name and ("phd" in name or "doctoral" in name):
         return "PROJECT_SPECIFIC_PHD"
+    if "open research" in name and ("phd" in name or "doctoral" in name):
+        return "OPEN_RESEARCH_PHD"
     if "phd" in name or "doctor" in name:
         return "PHD"
     return "OTHER"
@@ -65,7 +66,8 @@ def filter_programmes(items: list[dict], criteria: dict) -> list[dict]:
             continue
         if funding == "Funded" and not funding_looks_funded(payload.get("funding")):
             continue
-        if funding == "Unknown" and payload.get("funding") not in (None, "", "UNKNOWN"):
+        funding_text = str(payload.get("funding") or "").strip().upper()
+        if funding == "Unknown" and funding_text not in {"", "UNKNOWN"}:
             continue
         result.append(item)
     return result
@@ -111,8 +113,8 @@ class RecordControls:
         if changes["portal_url"]:
             from phd_agent.ledger import _url
             _url(changes["portal_url"])
-        self.ledger.update_application(application_id, **changes)
         with transaction(self.db_path) as db:
+            self.ledger.update_application(application_id, db=db, **changes)
             for field in choices:
                 if field in changes and before[field] != changes[field]:
                     db.execute("""INSERT INTO record_field_reviews
@@ -152,8 +154,8 @@ class RecordControls:
         if before["country"] != changes["country"]:
             changes["country_source"] = "OPERATOR" if verified else "MANUAL_UNVERIFIED"
             changes["country_match_state"] = "CONFIRMED" if verified else "UNKNOWN"
-        self.ledger.update_programme(programme_id, **changes)
         with transaction(self.db_path) as db:
+            self.ledger.update_programme(programme_id, db=db, **changes)
             differences = {}
             for key, value in changes.items():
                 if before[key] == value:
@@ -170,12 +172,12 @@ class RecordControls:
                      verified: bool = False) -> int:
         if not self.ledger.get("applications", application_id):
             raise ValueError("Application does not exist")
-        source = self.ledger.create_evidence(source_url, "OPERATOR_DEADLINE", due_at,
-                                             "VERIFIED" if verified else "NEEDS_REVIEW")
-        deadline = self.ledger.create_deadline(application_id, "APPLICATION", due_at, source,
-                                               verification_state="VERIFIED" if verified else "NEEDS_REVIEW",
-                                               last_checked_at=utc_now())
         with transaction(self.db_path) as db:
+            source = self.ledger.create_evidence(source_url, "OPERATOR_DEADLINE", due_at,
+                                                 "VERIFIED" if verified else "NEEDS_REVIEW", db=db)
+            deadline = self.ledger.create_deadline(application_id, "APPLICATION", due_at, source,
+                                                   verification_state="VERIFIED" if verified else "NEEDS_REVIEW",
+                                                   last_checked_at=utc_now(), db=db)
             self._audit(db, "APPLICATION", application_id, "DEADLINE_ADDED",
                         {"deadline_id": deadline, "verified": verified, "source_url": source_url})
         return deadline

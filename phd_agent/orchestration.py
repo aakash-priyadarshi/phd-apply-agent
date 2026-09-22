@@ -384,7 +384,7 @@ class ProgrammeOrchestrator:
             with connect(self.db_path) as db:
                 existing = db.execute("""SELECT id FROM programme_candidates
                     WHERE intent_id=? AND canonical_url=? AND review_state!='REJECTED'
-                      AND archived_at IS NULL ORDER BY id DESC LIMIT 1""",
+                    ORDER BY id DESC LIMIT 1""",
                     (intent_id, hit.official_url)).fetchone()
             if existing:
                 if after_hit:
