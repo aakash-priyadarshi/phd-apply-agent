@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import html
 import os
+from datetime import date, timedelta
 from pathlib import Path
 
 import streamlit as st
@@ -17,12 +18,13 @@ from phd_agent.ledger import APPLICATION_STATUSES, Ledger
 from phd_agent.operations import OperationService
 from phd_agent.orchestration import ProgrammeOrchestrator
 from phd_agent.outreach import OutreachService
+from phd_agent.planning import DailyPlanner, EVENT_TYPES
 from phd_agent.profile_workspace import ProfileUpload, ProfileWorkspace
 from phd_agent.record_controls import PROGRAMME_TYPES, RecordControls, filter_programmes, group_programmes
 from phd_agent.university_enrichment import REGION_COUNTRY_CODES, qs_sort_key, resolve_country_label
 
 
-PAGES = ("Home", "Find programmes", "Applications", "Universities", "People", "My documents", "Searches", "Operations")
+PAGES = ("Today", "Find programmes", "Applications", "Universities", "People", "My documents", "Searches", "Operations", "Calendar")
 COUNTRY_CHOICES = ("UK", "US", "Canada", "Switzerland", "Australia", "Singapore", "Germany",
                    "Netherlands", "France", "Ireland", "Sweden", "Europe")
 
@@ -336,31 +338,41 @@ def _candidate(orchestrator: ProgrammeOrchestrator, candidate: dict) -> None:
 
 
 def _home(path: Path, context: dict) -> None:
-    orchestrator = ProgrammeOrchestrator(path)
-    applications = Ledger(path).list_applications()
+    planner = DailyPlanner(path)
+    dashboard = planner.dashboard()
+    counts = dashboard["counts"]
     owner = context["context"]["owner_name"].split()[0]
     st.markdown(f"""<div class="simple-hero"><div class="eyebrow">Application workspace</div>
-      <h2>Welcome back, {html.escape(owner)}</h2><div class="muted">Tell the app what you want to find.
-      Your CV and supporting documents are already available as context.</div></div>""", unsafe_allow_html=True)
+      <h2>Welcome back, {html.escape(owner)}</h2><div class="muted">Here is what needs attention today.</div></div>""",
+      unsafe_allow_html=True)
     _profile_banner(path, context)
-    _create_intent(path, context, key="simple_home_intent")
-    active = [operation for operation in OperationService(path).list(10)
-              if operation["status"] in {"QUEUED", "RUNNING", "CANCEL_REQUESTED"}]
-    if active:
+    summary = (("Deadlines · 14 days", "deadlines_14_days"), ("Professor replies", "new_replies"),
+               ("Programme results", "programme_results"), ("Missing documents", "missing_required"))
+    for column, (label, key) in zip(st.columns(4), summary):
+        column.metric(label, counts[key])
+    st.caption(f"{counts['unknown_requirements']} requirements need checking · "
+               f"{counts['document_alerts']} document alerts · {counts['active_operations']} active operations")
+    st.subheader("Needs attention")
+    if not dashboard["actions"]:
+        st.success("Nothing urgent is recorded. Start a search or review your applications when ready.")
+    for index, item in enumerate(dashboard["actions"][:10]):
+        with st.container(border=True):
+            left, right = st.columns([5, 1])
+            left.markdown(f"**{html.escape(item['title'])}**")
+            left.caption(f"{item['priority'].title()} · {item['detail']}")
+            if right.button("Open", key=f"today_open_{index}"):
+                st.session_state.simple_nav_target = item["page"]
+                if item.get("application_id"):
+                    st.session_state.simple_focus_application_id = item["application_id"]
+                st.rerun()
+            if item.get("task_id") and st.button("Mark task done", key=f"today_complete_{item['task_id']}"):
+                if _run(lambda item=item: planner.complete_task(item["task_id"]), "Task completed"):
+                    st.rerun()
+    if counts["active_operations"]:
         st.subheader("Running now")
         _operation_live(path)
-    waiting = orchestrator.list_candidates(states=("NEW", "SHORTLISTED"))
-    st.subheader("Your next step")
-    if waiting:
-        st.info(f"Review {len(waiting)} programme candidate{'s' if len(waiting) != 1 else ''}.")
-        for item in waiting[:2]:
-            _candidate(orchestrator, item)
-    elif applications:
-        app = applications[0]
-        st.success(f"Continue {app['institution']} · {app['application_name']}")
-        st.write(app["next_action"] or "Review missing requirements and documents.")
-    else:
-        st.caption("Start with a research intent above, or analyse a programme URL in Find programmes.")
+    with st.expander("Start another programme search"):
+        _create_intent(path, context, key="simple_home_intent")
 
 
 def _discover(path: Path, context: dict) -> None:
@@ -479,6 +491,16 @@ def _applications(path: Path, context: dict) -> None:
     st.caption("One place for deadlines, missing items and the next action.")
     if not applications:
         st.info("Add a programme from Find programmes and it will appear here.")
+    application_map = {item["id"]: item for item in applications}
+    focus = st.session_state.pop("simple_focus_application_id", None)
+    if focus in application_map:
+        st.session_state.simple_application_filter = focus
+    selected = st.selectbox("Show application", [None, *application_map],
+        format_func=lambda value: "All applications" if value is None else
+            f"{application_map[value]['institution']} · {application_map[value]['application_name']}",
+        key="simple_application_filter")
+    if selected is not None:
+        applications = [application_map[selected]]
     view = st.radio("Arrange applications by", ("Deadline", "Country", "University"), horizontal=True)
     if view != "Deadline":
         applications = [item for children in group_programmes(applications, view=view).values()
@@ -733,6 +755,76 @@ def _operations(path: Path) -> None:
     _operation_live(path)
 
 
+def _calendar(path: Path) -> None:
+    planner = DailyPlanner(path)
+    applications = {item["id"]: item for item in Ledger(path).list_applications()}
+    st.title("Calendar")
+    st.caption("Deadlines, tasks, referee dates and your own events in one place. Unverified deadlines stay labeled.")
+    with st.expander("Add an event"):
+        with st.form("new_calendar_event"):
+            title = st.text_input("Event title", placeholder="Oxford interview preparation")
+            event_type = st.selectbox("Event type", EVENT_TYPES,
+                format_func=lambda value: value.replace("_", " ").title())
+            when = st.date_input("Date", value=date.today())
+            application_id = st.selectbox("Application", [None, *applications],
+                format_func=lambda value: "Personal / no application" if value is None else
+                    f"{applications[value]['institution']} · {applications[value]['application_name']}")
+            notes = st.text_area("Notes")
+            add = st.form_submit_button("Add event", type="primary")
+        if add and _run(lambda: planner.create_event(title, event_type, when.isoformat(),
+                     application_id=application_id, notes=notes), "Event added"):
+            st.rerun()
+    dates = st.columns(2)
+    start = dates[0].date_input("From", value=date.today(), key="calendar_from")
+    end = dates[1].date_input("To", value=date.today() + timedelta(days=60), key="calendar_to")
+    events = _run(lambda: planner.calendar(start, end))
+    if events is None:
+        return
+    st.caption(f"{len(events)} event{'s' if len(events) != 1 else ''} in this range")
+    if not events:
+        st.info("No events are recorded for these dates.")
+    day = None
+    for event in events:
+        event_day = event["when"][:10]
+        if event_day != day:
+            st.subheader(event_day)
+            day = event_day
+        with st.container(border=True):
+            st.markdown(f"**{html.escape(event['title'])}**")
+            st.caption(" · ".join(filter(None, (event["kind"].title(), event.get("institution"),
+                                                event.get("verification_state"), event["when"]))))
+            if event.get("source_url"):
+                st.link_button("Open source", event["source_url"])
+            if event["kind"] == "TASK" and st.button("Mark task done", key=f"calendar_done_{event['id']}"):
+                if _run(lambda event=event: planner.complete_task(event["id"]), "Task completed"):
+                    st.rerun()
+            if event["kind"] == "MANUAL":
+                with st.expander("Edit event"):
+                    with st.form(f"edit_event_{event['id']}"):
+                        revised_title = st.text_input("Title", value=event["title"])
+                        revised_type = st.selectbox("Type", EVENT_TYPES,
+                            index=EVENT_TYPES.index(event["event_type"]))
+                        revised_date = st.date_input("New date", value=date.fromisoformat(event_day))
+                        revised_notes = st.text_area("Notes", value=event["notes"])
+                        save = st.form_submit_button("Save event")
+                    if save and _run(lambda event=event: planner.edit_event(event["id"],
+                            title=revised_title, event_type=revised_type,
+                            starts_at=revised_date.isoformat(), notes=revised_notes), "Event updated"):
+                        st.rerun()
+                    if st.button("Cancel event", key=f"cancel_event_{event['id']}"):
+                        if _run(lambda event=event: planner.set_event_active(event["id"], False),
+                                "Event cancelled; it can be restored"):
+                            st.rerun()
+    with st.expander("Cancelled events"):
+        cancelled = [event for event in planner.calendar(start, end, include_cancelled=True)
+                     if event["kind"] == "MANUAL" and event["status"] == "CANCELLED"]
+        for event in cancelled:
+            st.write(f"{event['when']} · {event['title']}")
+            if st.button("Restore event", key=f"restore_event_{event['id']}"):
+                if _run(lambda event=event: planner.set_event_active(event["id"], True)):
+                    st.rerun()
+
+
 def _documents(path: Path, context: dict) -> None:
     workspace = ProfileWorkspace(path)
     latest = workspace.latest_summary()
@@ -802,7 +894,7 @@ def render_workspace(db_path: Path) -> None:
     if nav_target in PAGES:
         st.session_state.simple_nav = nav_target
     page = st.sidebar.radio("Navigation", PAGES, key="simple_nav", label_visibility="collapsed")
-    if page == "Home":
+    if page == "Today":
         _home(db_path, context)
     elif page == "Find programmes":
         _discover(db_path, context)
@@ -816,5 +908,7 @@ def render_workspace(db_path: Path) -> None:
         _searches(db_path, context)
     elif page == "Operations":
         _operations(db_path)
+    elif page == "Calendar":
+        _calendar(db_path)
     else:
         _documents(db_path, context)
