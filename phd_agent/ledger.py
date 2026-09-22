@@ -444,9 +444,10 @@ class Ledger:
                 (application_id,),
             )]
 
-    def today(self) -> dict:
-        today = date.today().isoformat()
-        cutoff = (date.today() + timedelta(days=60)).isoformat()
+    def today(self, *, as_of: date | None = None) -> dict:
+        current = as_of or date.today()
+        today = current.isoformat()
+        cutoff = (current + timedelta(days=60)).isoformat()
         with connect(self.db_path) as db:
             upcoming = [dict(r) for r in db.execute("""
                 SELECT d.*, COALESCE(p.university, o.institution) AS institution,

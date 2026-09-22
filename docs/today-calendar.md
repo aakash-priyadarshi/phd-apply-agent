@@ -1,0 +1,7 @@
+# Today and Calendar
+
+The **Today** page presents a short list of next actions from existing application facts. It uses fixed rules: recent overdue deadlines and tasks first; deadlines within seven days next; new professor replies, near-term events and missing required items; then saved programme results. An unverified deadline is explicitly labeled **Check**. Submitted or closed applications no longer produce application-deadline reminders. The applicant can open the relevant page or mark an existing task done. This page does not use an LLM to rank actions or silently create tasks.
+
+The **Calendar** page combines sourced application deadlines, active tasks, referee due dates, and manual date events. Source URLs and verification states remain visible for deadlines. Personal events may be unlinked; application events disappear from the active calendar while that application is archived and reappear after restoration. Manual events can be edited, cancelled, and restored. These changes and task completion are recorded in the existing audit table.
+
+Migration 11 adds only `calendar_events` and its date index. It does not alter existing application, document, outreach, or submission records. Events are date-oriented; time-zone-aware appointments and external calendar synchronization are separate future work. Watchlist refresh, change detection, notifications, and comparison also remain later roadmap slices.
