@@ -231,8 +231,8 @@ class Ledger:
             (SELECT MIN(d.due_at) FROM deadlines d WHERE d.application_id = a.id
              AND substr(d.due_at, 1, 10) >= ?) AS nearest_deadline
             FROM applications a
-            LEFT JOIN programmes p ON p.id = a.programme_id
             LEFT JOIN opportunities o ON o.id = a.opportunity_id
+            LEFT JOIN programmes p ON p.id = COALESCE(a.programme_id, o.programme_id)
             ORDER BY nearest_deadline IS NULL, nearest_deadline, a.id"""
         with connect(self.db_path) as db:
             return [dict(r) for r in db.execute(sql, (date.today().isoformat(),))]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import json
+import os
 import re
 import socket
 from dataclasses import dataclass
@@ -17,7 +18,9 @@ from bs4 import BeautifulSoup
 from PyPDF2 import PdfReader
 
 from phd_agent.applicant_context import ApplicantResearchContextService, normalized_terms
-from phd_agent.browser_worker import BrowserWorker
+from phd_agent.browser_worker import (
+    BrowserWorker, LocalPlaywrightWorker, readable_html_text, related_programme_urls,
+)
 from phd_agent.db import connect, migrate, transaction, utc_now
 from phd_agent.discovery import Discovery, canonical_url, freshness
 from phd_agent.ledger import Ledger
@@ -34,6 +37,20 @@ from phd_agent.university_enrichment import (
 USER_AGENT = "PhD-Application-Agent/1.0 (+operator-supervised programme review)"
 MAX_PAGE_BYTES = 2_000_000
 MIN_USEFUL_PAGE_TEXT = 300
+PAGE_CONTENT_SIGNALS = re.compile(
+    r"\b(deadline|phd|dphil|doctor of philosophy|funding|studentship|scholarship|"
+    r"eligib|requirement|ielts|toefl|transcript|apply|application|stipend|supervisor)\b",
+    re.I,
+)
+DEADLINE_HINT = (
+    r"(?:deadline|closes?|closing date|apply by|"
+    r"applications?\s+(?:close|due|must)|submit(?:ted)? by)"
+)
+MONTH_NAME = (
+    r"(?:January|February|March|April|May|June|July|August|September|October|November|December|"
+    r"Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sept?|Oct|Nov|Dec)\.?"
+)
+DAY_NUMBER = r"(?:0?[1-9]|[12]\d|3[01])(?:st|nd|rd|th)?"
 DOCUMENT_SIGNALS = {
     "CV": ("curriculum vitae", "cv", "resume"),
     "SOP": ("statement of purpose", "sop"),
@@ -100,24 +117,126 @@ def _first(pattern: str, text: str, flags=re.I) -> tuple[str | None, str]:
     return ((match.group(1).strip() if match else None), _snippet(text, match))
 
 
-def _iso_deadline(text: str) -> tuple[str | None, str, str | None]:
-    match = re.search(r"\b(20\d{2})[-/](0?[1-9]|1[0-2])[-/](0?[1-9]|[12]\d|3[01])\b", text)
-    if match:
-        value = f"{int(match.group(1)):04d}-{int(match.group(2)):02d}-{int(match.group(3)):02d}"
-        return value, _snippet(text, match), None
-    month = re.search(
-        r"\b(?:deadline|closes?|apply by|applications? due)\D{0,50}"
-        r"((?:0?[1-9]|[12]\d|3[01])\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+20\d{2})",
-        text, re.I,
-    )
-    if month:
+def _parse_human_date(raw: str) -> str | None:
+    cleaned = re.sub(r"(?<=\d)(st|nd|rd|th)\b", "", (raw or "").strip(), flags=re.I)
+    cleaned = re.sub(r"[,\s]+", " ", cleaned).strip()
+    for fmt in ("%Y-%m-%d", "%d %B %Y", "%B %d %Y", "%d %b %Y", "%b %d %Y"):
         try:
-            value = datetime.strptime(month.group(1), "%d %B %Y").date().isoformat()
-            return value, _snippet(text, month), None
+            return datetime.strptime(cleaned, fmt).date().isoformat()
         except ValueError:
-            pass
+            continue
+    return None
+
+
+def _iso_deadline(text: str) -> tuple[str | None, str, str | None]:
+    iso_pattern = r"\b(20\d{2})[-/](0?[1-9]|1[0-2])[-/](0?[1-9]|[12]\d|3[01])\b"
+    iso = re.search(rf"{DEADLINE_HINT}[^\n.]{{0,80}}{iso_pattern}", text, re.I)
+    if not iso:
+        for candidate in re.finditer(iso_pattern, text):
+            window = text[max(0, candidate.start() - 90):candidate.end() + 40]
+            if re.search(DEADLINE_HINT, window, re.I):
+                iso = candidate
+                break
+    if iso:
+        value = f"{int(iso.group(1)):04d}-{int(iso.group(2)):02d}-{int(iso.group(3)):02d}"
+        return value, _snippet(text, iso), None
+    for pattern in (
+        rf"{DEADLINE_HINT}[^\n.]{{0,90}}({DAY_NUMBER}\s+{MONTH_NAME}\s+20\d{{2}})",
+        rf"{DEADLINE_HINT}[^\n.]{{0,90}}({MONTH_NAME}\s+{DAY_NUMBER},?\s+20\d{{2}})",
+    ):
+        month = re.search(pattern, text, re.I)
+        if month:
+            parsed = _parse_human_date(month.group(1))
+            if parsed:
+                return parsed, _snippet(text, month), None
+    for pattern in (
+        rf"\b({DAY_NUMBER}\s+{MONTH_NAME}\s+20\d{{2}})\b",
+        rf"\b({MONTH_NAME}\s+{DAY_NUMBER},?\s+20\d{{2}})\b",
+    ):
+        for month in re.finditer(pattern, text, re.I):
+            window = text[max(0, month.start() - 90):month.end() + 40]
+            if re.search(DEADLINE_HINT, window, re.I):
+                parsed = _parse_human_date(month.group(1))
+                if parsed:
+                    return parsed, _snippet(text, month), None
     raw, excerpt = _first(r"(?:deadline|closes?|apply by|applications? due)\s*[:\-]?\s*([^.;\n]{4,80})", text)
     return None, excerpt, raw
+
+
+def _jsonld_items(html: str) -> list[dict]:
+    if not html:
+        return []
+    soup = BeautifulSoup(html, "html.parser")
+    items: list[dict] = []
+    pending: list = []
+    for script in soup.find_all("script", attrs={"type": re.compile(r"ld\+json", re.I)}):
+        raw = script.string or script.get_text() or ""
+        try:
+            pending.append(json.loads(raw))
+        except json.JSONDecodeError:
+            continue
+    while pending:
+        block = pending.pop()
+        if isinstance(block, list):
+            pending.extend(block)
+            continue
+        if not isinstance(block, dict):
+            continue
+        graph = block.get("@graph")
+        if isinstance(graph, list):
+            pending.extend(graph)
+            continue
+        items.append(block)
+    return items
+
+
+def _structured_page_facts(html: str) -> dict:
+    facts: dict[str, str] = {}
+    if not html:
+        return facts
+    soup = BeautifulSoup(html, "html.parser")
+    for key, attr, name in (
+        ("university", "property", "og:site_name"),
+        ("programme", "property", "og:title"),
+        ("description", "name", "description"),
+        ("description", "property", "og:description"),
+    ):
+        node = soup.find("meta", attrs={attr: name})
+        content = (node.get("content") or "").strip() if node else ""
+        if content:
+            facts.setdefault(key, content)
+    for item in _jsonld_items(html):
+        types = item.get("@type")
+        type_text = " ".join(types) if isinstance(types, list) else str(types or "")
+        name = item.get("name")
+        if isinstance(name, str) and name.strip():
+            if re.search(r"CollegeOrUniversity|EducationalOrganization|Organization", type_text, re.I):
+                facts.setdefault("university", name.strip())
+            else:
+                facts.setdefault("programme", name.strip())
+        for key in ("provider", "organizer", "offeredBy"):
+            org = item.get(key)
+            if isinstance(org, dict) and isinstance(org.get("name"), str):
+                facts.setdefault("university", org["name"].strip())
+        start = item.get("startDate")
+        if isinstance(start, str) and re.match(r"20\d{2}-\d{2}-\d{2}", start):
+            facts.setdefault("intake", start[:10])
+        for date_key in ("validThrough", "endDate"):
+            value = item.get(date_key)
+            if isinstance(value, str) and re.match(r"20\d{2}-\d{2}-\d{2}", value):
+                facts.setdefault("deadline", value[:10])
+        location = item.get("address") or item.get("location")
+        if isinstance(location, dict):
+            nested = location.get("address") if isinstance(location.get("address"), dict) else location
+            country = nested.get("addressCountry") if isinstance(nested, dict) else None
+            if isinstance(country, str) and country.strip():
+                facts.setdefault("official_country", country.strip())
+    time_node = soup.find("time", attrs={"datetime": True})
+    if time_node:
+        parsed = _parse_human_date((time_node.get("datetime") or "")[:10])
+        if parsed:
+            facts.setdefault("deadline", parsed)
+    return facts
 
 
 @dataclass(frozen=True)
@@ -129,6 +248,19 @@ class Acquisition:
     html: str = ""
     reason: str | None = None
     browser_fallback_allowed: bool = True
+
+
+def _intent_filters_keeping_unknowns(payload: dict, filters: dict | None) -> dict:
+    """Drop intent filters that would hide candidates whose enrichment is still unknown."""
+    relaxed = dict(filters or {})
+    if not str(payload.get("country_code") or "").strip():
+        relaxed.pop("country_codes", None)
+    if payload.get("qs_match_state") not in {"EXACT", "ALIAS_MATCH"}:
+        relaxed.pop("qs_max", None)
+    funding = str(payload.get("funding") or "").strip()
+    if not funding or funding.casefold() == "unknown":
+        relaxed.pop("funded_only", None)
+    return relaxed
 
 
 class ProgrammeOrchestrator:
@@ -259,7 +391,7 @@ class ProgrammeOrchestrator:
                                       metadata={"provider": search.provider, "model": route.model})
         return {"route": route, "hits": len(hits), "candidates": created, "human_fallbacks": fallbacks}
 
-    def acquire_static(self, url: str) -> Acquisition:
+    def _http_get(self, url: str) -> Acquisition:
         safe_url = "invalid://public-url"
         try:
             safe_url = _public_url(url)
@@ -303,10 +435,7 @@ class ProgrammeOrchestrator:
                 text = "\n".join(page.extract_text() or "" for page in PdfReader(BytesIO(raw)).pages)
                 return Acquisition("ACQUIRED", "STATIC_HTTP", final_url, text=text)
             html = raw.decode(response.encoding or "utf-8", errors="replace")
-            soup = BeautifulSoup(html, "html.parser")
-            for node in soup(["script", "style", "noscript", "svg"]):
-                node.decompose()
-            text = soup.get_text("\n", strip=True)
+            text = readable_html_text(html)
             if re.search(r"captcha|access denied|verify you are human|enable javascript", text, re.I):
                 return Acquisition("HUMAN_INPUT_REQUIRED", "STATIC_HTTP", final_url,
                                    reason="The site blocked automated reading or requires human verification")
@@ -319,19 +448,71 @@ class ProgrammeOrchestrator:
             return Acquisition("HUMAN_INPUT_REQUIRED", "STATIC_HTTP", safe_url,
                                reason=f"Static acquisition failed: {type(error).__name__}")
 
+    def acquire_static(self, url: str) -> Acquisition:
+        page = self._http_get(url)
+        if page.status != "ACQUIRED" or not page.html:
+            return page
+        extras = []
+        for related in related_programme_urls(page.html, page.url, limit=3):
+            extra = self._http_get(related)
+            if extra.status == "ACQUIRED" and extra.text:
+                extras.append(f"## {extra.url}\n{extra.text}")
+        if not extras:
+            return page
+        combined = (f"## {page.url}\n{page.text}\n\n" + "\n\n".join(extras))[:200_000]
+        return Acquisition(page.status, page.method, page.url, text=combined, html=page.html,
+                           reason=page.reason, browser_fallback_allowed=page.browser_fallback_allowed)
+
+    def _page_looks_thin(self, acquisition: Acquisition) -> bool:
+        text = acquisition.text or ""
+        if len(text) < 1200:
+            return True
+        if len(PAGE_CONTENT_SIGNALS.findall(text)) < 2:
+            return True
+        return bool(re.search(r"enable javascript|please wait|loading\.\.\.", text, re.I))
+
+    def _local_browser_worker(self) -> BrowserWorker | None:
+        if os.getenv("PYTEST_CURRENT_TEST"):
+            return None
+        try:
+            from phd_agent.config import load_settings
+            if load_settings().hosted:
+                return None
+        except Exception:
+            return None
+        try:
+            from playwright.sync_api import sync_playwright  # noqa: F401
+        except ImportError:
+            return None
+        return LocalPlaywrightWorker()
+
+    def acquire_page(self, url: str, *, browser_worker: BrowserWorker | None = None) -> Acquisition:
+        acquisition = self.acquire_static(url)
+        worker = browser_worker if browser_worker is not None else self._local_browser_worker()
+        if not (worker and acquisition.browser_fallback_allowed and (
+                acquisition.status != "ACQUIRED"
+                or len(acquisition.text) < MIN_USEFUL_PAGE_TEXT
+                or self._page_looks_thin(acquisition))):
+            return acquisition
+        try:
+            rendered = worker.acquire(acquisition.url)
+            rendered_url = _public_url(rendered.url)
+            if rendered.status == "ACQUIRED" and len(rendered.text or "") >= MIN_USEFUL_PAGE_TEXT:
+                return Acquisition(rendered.status, rendered.method, rendered_url, rendered.text,
+                                   rendered.html, rendered.human_action)
+            if acquisition.status == "ACQUIRED" and len(acquisition.text) >= MIN_USEFUL_PAGE_TEXT:
+                return acquisition
+            return Acquisition(rendered.status, rendered.method, rendered_url, rendered.text,
+                               rendered.html, rendered.human_action)
+        except (RuntimeError, ValueError) as error:
+            if acquisition.status == "ACQUIRED" and len(acquisition.text) >= MIN_USEFUL_PAGE_TEXT:
+                return acquisition
+            return Acquisition("HUMAN_INPUT_REQUIRED", "PLAYWRIGHT", acquisition.url,
+                               reason=str(error), browser_fallback_allowed=False)
+
     def analyse_url(self, url: str, context_id: int, *, intent_id: int | None = None,
                     browser_worker: BrowserWorker | None = None) -> dict:
-        acquisition = self.acquire_static(url)
-        if (browser_worker and acquisition.browser_fallback_allowed
-                and (acquisition.status != "ACQUIRED" or len(acquisition.text) < MIN_USEFUL_PAGE_TEXT)):
-            try:
-                rendered = browser_worker.acquire(acquisition.url)
-                rendered_url = _public_url(rendered.url)
-                acquisition = Acquisition(rendered.status, rendered.method, rendered_url, rendered.text,
-                                          rendered.html, rendered.human_action)
-            except (RuntimeError, ValueError) as error:
-                acquisition = Acquisition("HUMAN_INPUT_REQUIRED", "PLAYWRIGHT", acquisition.url,
-                                          reason=str(error), browser_fallback_allowed=False)
+        acquisition = self.acquire_page(url, browser_worker=browser_worker)
         if acquisition.status != "ACQUIRED" or len(acquisition.text) < MIN_USEFUL_PAGE_TEXT:
             reason = acquisition.reason or "The retrieved page did not contain enough readable programme text"
             ingestion_id = self._save_ingestion(intent_id, acquisition.url, acquisition.method,
@@ -367,13 +548,14 @@ class ProgrammeOrchestrator:
     def _analyse_acquired(self, url: str, text: str, html: str, method: str,
                           context_id: int, intent_id: int | None, source_note: str | None = None) -> dict:
         self.contexts.get(context_id)
+        extract_text = text[:80_000]
         clean = _clean_text(text)
         evidence_state = "NEEDS_REVIEW" if method != "STATIC_HTTP" else "UNVERIFIED"
         excerpt = clean[:12000]
         evidence_id = self.ledger.create_evidence(url, "PROGRAMME", excerpt, evidence_state)
         ingestion_id = self._save_ingestion(intent_id, url, method, "ACQUIRED", clean,
                                             source_evidence_id=evidence_id)
-        payload, field_evidence, confidence = self._extract(url, clean, html, context_id)
+        payload, field_evidence, confidence = self._extract(url, extract_text, html, context_id)
         if source_note:
             field_evidence["source_method"] = {"state": "MANUALLY_SUPPLIED", "excerpt": source_note}
         candidate_id = self._save_candidate(
@@ -396,10 +578,12 @@ class ProgrammeOrchestrator:
 
     def _extract(self, url: str, text: str, html: str, context_id: int) -> tuple[dict, dict, float]:
         soup = BeautifulSoup(html, "html.parser") if html else None
-        title = _clean_text((soup.title.get_text(" ") if soup and soup.title else ""))
+        facts = _structured_page_facts(html)
+        title = _clean_text((soup.title.get_text(" ") if soup and soup.title else "")) or facts.get("programme", "")
         h1 = _clean_text((soup.find("h1").get_text(" ") if soup and soup.find("h1") else ""))
-        programme = h1 or title.split("|")[0].split("–")[0].strip()
-        degree, degree_excerpt = _first(r"\b((?:Doctor of Philosophy|PhD|DPhil)(?:\s+(?:in|programme in)\s+[^.;|]{2,90})?)", text)
+        programme = h1 or title.split("|")[0].split("–")[0].strip() or facts.get("programme")
+        degree, degree_excerpt = _first(
+            r"\b((?:Doctor of Philosophy|PhD|DPhil)(?:\s+(?:in|programme in)\s+[^.;|\n]{2,90})?)", text)
         if not programme and degree:
             programme = degree
         host_label = (urlparse(url).hostname or "University").split(".")[-2].replace("-", " ").title()
@@ -410,14 +594,32 @@ class ProgrammeOrchestrator:
                 break
         if not university:
             match = re.search(r"([A-Z][A-Za-z&' .-]{2,80}(?:University|Institute|College|School))", text)
-            university = _clean_text(match.group(1)) if match else host_label
-        department, department_excerpt = _first(r"\b((?:Department|School|Faculty) of [A-Z][A-Za-z& ,'-]{2,90})", text)
-        intake, intake_excerpt = _first(r"\b((?:September|October|January|Fall|Autumn|Spring)?\s*20\d{2}\s+(?:entry|intake|start)?)\b", text)
+            university = _clean_text(match.group(1)) if match else facts.get("university") or host_label
+        university = university or facts.get("university") or host_label
+        department, department_excerpt = _first(
+            r"\b((?:Department|School|Faculty) of [A-Z][A-Za-z& ,'-]{2,90})", text)
+        intake, intake_excerpt = _first(
+            r"\b((?:September|October|January|Fall|Autumn|Spring)?\s*20\d{2}\s+(?:entry|intake|start)?)\b", text)
+        intake = intake or facts.get("intake")
         deadline, deadline_excerpt, raw_deadline = _iso_deadline(text)
-        funding, funding_excerpt = _first(r"((?:fully funded|funding|studentship|scholarship)[^.;]{0,220})", text)
-        eligibility, eligibility_excerpt = _first(r"((?:eligibility|entry requirements?|minimum requirements?)[^.;]{0,260})", text)
-        fees, fees_excerpt = _first(r"((?:tuition fees?|application fee)[^.;]{0,180})", text)
-        english, english_excerpt = _first(r"((?:English language|IELTS|TOEFL)[^.;]{0,220})", text)
+        deadline = deadline or facts.get("deadline")
+        funding, funding_excerpt = _first(
+            r"((?:fully funded|funding|studentship|scholarship|stipend)[^.;\n]{0,220})", text)
+        eligibility, eligibility_excerpt = _first(
+            r"((?:eligibility|entry requirements?|minimum requirements?|admission requirements?)[^.;\n]{0,260})", text)
+        fees, fees_excerpt = _first(r"((?:tuition fees?|application fee)[^.;\n]{0,180})", text)
+        english, english_excerpt = _first(r"((?:English language|IELTS|TOEFL)[^.;\n]{0,220})", text)
+        application_url = url
+        if soup:
+            for anchor in soup.select("a[href]"):
+                href = anchor.get("href") or ""
+                label = anchor.get_text(" ", strip=True)
+                if re.search(r"how.to.apply|\bapply now\b|application portal|online application",
+                             f"{href} {label}", re.I):
+                    candidate_url = urljoin(url, href)
+                    if urlparse(candidate_url).scheme in {"http", "https"}:
+                        application_url = candidate_url
+                        break
         docs = []
         doc_evidence = {}
         lowered = f" {text.casefold()} "
@@ -450,7 +652,8 @@ class ProgrammeOrchestrator:
         demonstrated = [item for item in retrieval.items if item.classification == "DEMONSTRATED"]
         proposed = [item for item in retrieval.items if item.classification == "PROPOSED"]
         fit_score = round(min(10, sum(item.score for item in retrieval.items) / max(1, len(retrieval.items)) / 2), 1)
-        university_match = enrich_university(university or host_label, page_text=text)
+        university_match = enrich_university(
+            university or host_label, official_country=facts.get("official_country"), page_text=text)
         payload = {
             "university": university or None, "department": department,
             "programme": programme or degree, "degree": degree,
@@ -461,7 +664,7 @@ class ProgrammeOrchestrator:
             "statement_requirement": next((d["state"] for d in docs if d["document_type"] in {"SOP", "PERSONAL_STATEMENT"}), "UNKNOWN"),
             "cv_requirement": next((d["state"] for d in docs if d["document_type"] == "CV"), "UNKNOWN"),
             "referee_count": referee_count, "supervisor_contact_policy": contact_policy,
-            "application_route": url, "official_application_url": url,
+            "application_route": application_url, "official_application_url": application_url,
             "research_fit": fit_score,
             "demonstrated_overlap": [item.text for item in demonstrated],
             "proposed_overlap": [item.text for item in proposed],
@@ -569,17 +772,22 @@ class ProgrammeOrchestrator:
         items = [self.get_candidate(candidate_id) for candidate_id in ids]
         result = []
         for item in items:
-            filters = {}
+            inferred = {}
+            extra = {}
             if item.get("intent_id"):
                 try:
-                    filters.update(self._intent(item["intent_id"])["filters"])
+                    inferred = dict(self._intent(item["intent_id"])["filters"])
                 except ValueError:
                     pass
             if extra_filters:
-                filters.update({key: value for key, value in extra_filters.items()
-                                if value not in (None, "", [], "Any")})
-            if candidate_matches_filters(item["payload"], filters):
-                result.append(item)
+                extra = {key: value for key, value in extra_filters.items()
+                         if value not in (None, "", [], "Any")}
+            visible = _intent_filters_keeping_unknowns(item["payload"], inferred)
+            if not candidate_matches_filters(item["payload"], visible):
+                continue
+            if extra and not candidate_matches_filters(item["payload"], extra):
+                continue
+            result.append(item)
         return result
 
     def review_candidate(self, candidate_id: int, decision: str, reviewer: str) -> None:
@@ -824,7 +1032,7 @@ class ProgrammeOrchestrator:
                 continue
             if institution and institution.casefold() not in hit.institution.casefold() and hit.institution.casefold() not in institution.casefold():
                 continue
-            acquisition = self.acquire_static(hit.official_url)
+            acquisition = self.acquire_page(hit.official_url)
             if acquisition.status != "ACQUIRED" or len(acquisition.text) < MIN_USEFUL_PAGE_TEXT:
                 fallbacks.append({"url": hit.official_url, "reason": acquisition.reason})
                 continue

@@ -10,12 +10,15 @@ import pytest
 from streamlit.testing.v1 import AppTest
 
 from phd_agent.applicant_context import ApplicantResearchContextService
-from phd_agent.browser_worker import FormPlanService, fields_from_html
+from phd_agent.browser_worker import FormPlanService, fields_from_html, labels_match, unique_matching_index
 from phd_agent.db import connect, migrate
 from phd_agent.documents import DocumentVault
 from phd_agent.materials import MaterialStudio
 from phd_agent.model_router import ModelConfig, ModelRouter
-from phd_agent.orchestration import Acquisition, ProgrammeOrchestrator
+from phd_agent.orchestration import (
+    Acquisition, ProgrammeOrchestrator, _intent_filters_keeping_unknowns, _iso_deadline,
+    _parse_human_date,
+)
 from phd_agent.official_search import OfficialSearchResult, OpenAIOfficialSearchProvider, SearchBatch, SearchHit
 from phd_agent.portal import PortalAssistance
 from phd_agent.profile import ApplicantTruth
@@ -217,6 +220,44 @@ def test_programme_ingestion_records_qs_rank_separately_from_research_fit(applic
     assert programme["country"] == "United States"
 
 
+def test_intent_filters_keep_unknown_enrichment_and_extra_filters_stay_hard(applicant):
+    orchestrator = ProgrammeOrchestrator(applicant["path"])
+    intent = orchestrator.create_intent(
+        "Find funded 2027 PhD programmes in the US, preferably QS top 25",
+        applicant["context"]["id"],
+    )
+    html = """
+      <html><head><title>PhD in Computing | Unknown College</title></head>
+      <body><h1>PhD in Computing</h1>
+      <p>Unknown College Department of Computing. September 2027 entry.</p>
+      <p>Applicants should hold a masters degree.</p>
+      </body></html>
+    """
+    result = orchestrator.analyse_supplied(
+        "https://unknown.example/phd", html, applicant["context"]["id"], intent_id=intent["id"],
+        method="UPLOADED_HTML", filename="unknown.html",
+    )
+    payload = result["candidate"]["payload"]
+    assert not payload.get("country_code")
+    assert payload["qs_match_state"] == "UNKNOWN"
+    relaxed = _intent_filters_keeping_unknowns(payload, intent["filters"])
+    assert "country_codes" not in relaxed
+    assert "qs_max" not in relaxed
+    assert "funded_only" not in relaxed
+    listed = orchestrator.list_candidates(intent_id=intent["id"])
+    assert any(item["id"] == result["candidate"]["id"] for item in listed)
+    assert orchestrator.list_candidates(
+        intent_id=intent["id"], extra_filters={"country_codes": ["US"]}) == []
+
+
+def test_deadline_parsing_keeps_august_and_ignores_unrelated_dates():
+    assert _parse_human_date("8th August 2026") == "2026-08-08"
+    assert _parse_human_date("August 8th, 2026") == "2026-08-08"
+    assert _iso_deadline("Deadline: 8th August 2026")[0] == "2026-08-08"
+    assert _iso_deadline("The deadline is 2026-12-08.")[0] == "2026-12-08"
+    assert _iso_deadline("Last updated 2026-01-02. Contact the department.")[0] is None
+
+
 def test_failed_automation_requests_human_content_without_creating_candidate(applicant, monkeypatch):
     orchestrator = ProgrammeOrchestrator(applicant["path"])
     monkeypatch.setattr(orchestrator, "acquire_static", lambda url: Acquisition(
@@ -357,11 +398,18 @@ def test_browser_locators_prefer_label_name_and_tag_specific_nth():
       </form>
     """)
     locators = {field.label: field.locator for field in fields}
-    assert locators["Research experience"] == "get-by-label:Research experience"
-    assert locators["Country"] == "get-by-label:Country"
+    assert locators["Research experience"] == "textarea[name='research']"
+    assert locators["Country"] == "select[name='country']"
     assert locators["Full legal name"] == "get-by-label:Full legal name"
     assert not any("nth-of-type" in field.locator for field in fields)
     assert not any(field.locator.startswith("input:") for field in fields)
+    placeholder = fields_from_html("<form><input placeholder='Email address'></form>")
+    assert placeholder[0].label == "Email address"
+    assert placeholder[0].locator == "input[placeholder='Email address']"
+    assert labels_match("Full legal name", "Full legal name")
+    assert not labels_match("Name", "Full legal name")
+    assert unique_matching_index("Email address", [["Email address"], ["Email address"]]) is None
+    assert unique_matching_index("Email address", [["Name"], ["Email address"]]) == 1
 
 
 def test_browser_locators_use_tag_specific_nth_without_identity():

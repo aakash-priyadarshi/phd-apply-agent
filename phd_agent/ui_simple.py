@@ -209,8 +209,20 @@ def _create_intent(orchestrator: ProgrammeOrchestrator, context: dict, *, key: s
     st.session_state.simple_intent_id = created["id"]
     _run(lambda: orchestrator.discover_from_ledger(created["id"]))
     api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    discovery = None
     if api_key:
-        _run(lambda: orchestrator.discover_official_web(created["id"], api_key=api_key))
+        discovery = _run(lambda: orchestrator.discover_official_web(created["id"], api_key=api_key))
+    found = 0
+    if isinstance(discovery, dict):
+        found = len(discovery.get("candidates") or [])
+    waiting = orchestrator.list_candidates(states=("NEW", "SHORTLISTED", "ACCEPTED"))
+    found = max(found, len(waiting))
+    st.session_state.simple_nav_target = "Find programmes"
+    st.session_state.simple_discovery_notice = (
+        f"Search finished. {found} programme result{'s' if found != 1 else ''} "
+        "are ready on this page."
+        if found else "Search finished. Review any programme results below, or paste an official URL."
+    )
     st.rerun()
 
 
@@ -233,11 +245,11 @@ def _candidate(orchestrator: ProgrammeOrchestrator, candidate: dict) -> None:
         if relevant:
             st.write("**Why it matches your profile:**", relevant[0])
         if candidate["review_state"] != "ACCEPTED":
+            st.caption("Adding accepts the university and programme. Deadline and supervisor contact stay unverified.")
             add, save, dismiss = st.columns([1.25, 1, 1])
             if add.button("Add application", key=f"simple_add_{candidate['id']}", type="primary"):
                 confirmed = {key: payload.get(key) for key in (
-                    "university", "programme", "department", "degree", "intake", "deadline",
-                    "supervisor_contact_policy", "application_route", "official_application_url",
+                    "university", "programme", "department", "degree", "intake",
                 ) if payload.get(key) is not None}
                 if _run(lambda: orchestrator.accept_candidate(
                         candidate["id"], "Local operator", cycle=payload.get("intake"),
@@ -264,13 +276,13 @@ def _candidate(orchestrator: ProgrammeOrchestrator, candidate: dict) -> None:
 def _home(path: Path, context: dict) -> None:
     orchestrator = ProgrammeOrchestrator(path)
     applications = Ledger(path).list_applications()
-    waiting = orchestrator.list_candidates(states=("NEW", "SHORTLISTED"))
     owner = context["context"]["owner_name"].split()[0]
     st.markdown(f"""<div class="simple-hero"><div class="eyebrow">Application workspace</div>
       <h2>Welcome back, {html.escape(owner)}</h2><div class="muted">Tell the app what you want to find.
       Your CV and supporting documents are already available as context.</div></div>""", unsafe_allow_html=True)
     _profile_banner(path, context)
     _create_intent(orchestrator, context, key="simple_home_intent")
+    waiting = orchestrator.list_candidates(states=("NEW", "SHORTLISTED"))
     st.subheader("Your next step")
     if waiting:
         st.info(f"Review {len(waiting)} programme candidate{'s' if len(waiting) != 1 else ''}.")
@@ -288,6 +300,9 @@ def _discover(path: Path, context: dict) -> None:
     orchestrator = ProgrammeOrchestrator(path)
     st.title("Find programmes")
     st.caption("Search from your research goals or paste one official programme page.")
+    notice = st.session_state.pop("simple_discovery_notice", None)
+    if notice:
+        st.success(notice)
     _create_intent(orchestrator, context, key="simple_discover_intent")
     st.divider()
     filters = st.columns(4)
@@ -310,6 +325,8 @@ def _discover(path: Path, context: dict) -> None:
             intent_id=st.session_state.get("simple_intent_id")))
         if result:
             st.session_state.simple_url_result = result
+            if result.get("status") == "CANDIDATE_READY":
+                st.session_state.simple_discovery_notice = "Programme page analysed. Results are below."
             st.rerun()
     result = st.session_state.get("simple_url_result")
     if result and result.get("status") == "HUMAN_INPUT_REQUIRED":
@@ -390,6 +407,10 @@ def _people(path: Path, context: dict) -> None:
         if api_key:
             _run(lambda: orchestrator.discover_faculty_official_web(
                 application_id, context["id"], api_key=api_key))
+            refreshed = _run(lambda: orchestrator.professor_cards(application_id, context["id"]))
+            if refreshed is not None:
+                st.session_state[f"simple_people_{application_id}"] = refreshed
+        st.rerun()
     cards = st.session_state.get(f"simple_people_{application_id}", [])
     if not cards:
         st.caption("No reviewed supervisor matches yet. Use Find relevant supervisors to check current records.")
@@ -492,7 +513,10 @@ def render_workspace(db_path: Path) -> None:
     else:
         st.sidebar.markdown('<span class="ready-pill">Review profile</span>', unsafe_allow_html=True)
     st.sidebar.caption(track)
-    page = st.sidebar.radio("Navigation", PAGES, label_visibility="collapsed")
+    nav_target = st.session_state.pop("simple_nav_target", None)
+    if nav_target in PAGES:
+        st.session_state.simple_nav = nav_target
+    page = st.sidebar.radio("Navigation", PAGES, key="simple_nav", label_visibility="collapsed")
     if page == "Home":
         _home(db_path, context)
     elif page == "Find programmes":

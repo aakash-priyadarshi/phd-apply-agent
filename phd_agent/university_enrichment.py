@@ -116,6 +116,7 @@ REGION_COUNTRY_CODES = {
     "UK": {"GB"},
     "US": {"US"},
     "CANADA": {"CA"},
+    "SWITZERLAND": {"CH"},
     "AUSTRALIA": {"AU"},
     "SINGAPORE": {"SG"},
     "EUROPE": {
@@ -195,23 +196,65 @@ def extract_country(text: str | None) -> tuple[str | None, str | None, str | Non
     return None, None, None
 
 
+def page_location_country(text: str | None, university: str | None = None) -> tuple[str | None, str | None]:
+    """Country only when the page states a location, not when it mentions applicants or partners."""
+    raw = text or ""
+    institution = (university or "").strip()
+    for needle, (country, code) in sorted(COUNTRY_NAMES.items(), key=lambda item: -len(item[0])):
+        for match in re.finditer(rf"\b{re.escape(needle)}\b", raw, re.I):
+            before = raw[max(0, match.start() - 80):match.start()]
+            if re.search(r"located|based|situated|campus|address|headquartered", before, re.I):
+                return country, code
+            if institution and re.search(
+                    rf"{re.escape(institution)}\W{{0,40}}$", before, re.I):
+                return country, code
+    return None, None
+
+
+def resolve_country_label(value: str | None) -> tuple[str | None, str | None]:
+    text = (value or "").strip()
+    if not text:
+        return None, None
+    named = COUNTRY_NAMES.get(text.casefold())
+    if named:
+        return named
+    if re.fullmatch(r"[A-Za-z]{2}", text):
+        code = text.upper()
+        for country, country_code in COUNTRY_NAMES.values():
+            if country_code == code:
+                return country, code
+    return None, None
+
+
 def enrich_university(university: str, *, official_country: str | None = None,
                       page_text: str | None = None) -> UniversityMatch:
     match = lookup_catalog(university)
-    page_country, page_code, _ = extract_country(page_text)
-    official = (official_country or "").strip()
-    official_code = COUNTRY_NAMES.get(official.casefold(), (official or None, None))[1] if official else None
-    if official:
-        country, code, source = official, official_code or match.country_code, "OFFICIAL"
-    elif page_country:
-        country, code, source = page_country, page_code, "OFFICIAL"
-    else:
+    _page_country, page_code = page_location_country(page_text, university)
+    official_name, official_code = resolve_country_label(official_country)
+    if (official_country or "").strip():
+        if not official_code:
+            country, code, source = None, None, "OFFICIAL"
+            country_state = "COUNTRY_MATCH_NEEDS_REVIEW"
+        else:
+            country, code, source = official_name, official_code, "OFFICIAL"
+            if match.country_code and code != match.country_code:
+                country_state = "COUNTRY_MATCH_NEEDS_REVIEW"
+            elif match.country_code and code == match.country_code:
+                country_state = "CONFIRMED"
+            else:
+                country_state = "OFFICIAL"
+    elif match.country and page_code == match.country_code:
         country, code, source = match.country, match.country_code, match.country_source
-    country_state = source
-    if match.country_code and code and match.country_code != code:
-        country_state = "COUNTRY_MATCH_NEEDS_REVIEW"
-    elif source == "OFFICIAL" and match.country_code and code == match.country_code:
         country_state = "CONFIRMED"
+    elif match.country and page_code and page_code != match.country_code:
+        country, code, source = match.country, match.country_code, match.country_source
+        country_state = "COUNTRY_MATCH_NEEDS_REVIEW"
+    elif match.country:
+        country, code, source = match.country, match.country_code, match.country_source
+        country_state = match.country_match_state
+    else:
+        country, code, source = None, None, "UNKNOWN"
+        country_state = "UNKNOWN"
     return UniversityMatch(
         canonical_name=match.canonical_name or university.strip(),
         country=country, country_code=code,
@@ -257,7 +300,8 @@ def parse_preference_filters(intent_text: str, existing: dict | None = None) -> 
         filters["qs_max"] = int(qs_match.group(1))
     countries = set(filters.get("country_codes") or [])
     for region, codes in REGION_COUNTRY_CODES.items():
-        if re.search(rf"\b{re.escape(region)}\b", text, re.I) or (
+        flags = 0 if region in {"US", "UK"} else re.I
+        if re.search(rf"\b{re.escape(region)}\b", text, flags) or (
                 region == "UK" and re.search(r"\bunited kingdom\b", text, re.I)):
             countries.update(codes)
     for name, (_country, code) in COUNTRY_NAMES.items():
@@ -274,10 +318,8 @@ def candidate_matches_filters(payload: dict, filters: dict | None) -> bool:
     if not filters:
         return True
     countries = set(filters.get("country_codes") or [])
-    if countries:
-        code = (payload.get("country_code") or "").upper()
-        if code not in countries:
-            return False
+    if countries and (payload.get("country_code") or "").upper() not in countries:
+        return False
     qs_max = filters.get("qs_max")
     if qs_max:
         rank = _rank_value(payload)

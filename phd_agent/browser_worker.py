@@ -7,7 +7,7 @@ import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Protocol, Sequence
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
@@ -29,24 +29,73 @@ def _normalized_label(value: str) -> str:
     return re.sub(r"\W+", " ", (value or "").casefold()).strip()
 
 
+RELATED_PAGE_RE = re.compile(
+    r"admissions?|how.to.apply|\bapply\b|application|funding|studentship|scholarship|"
+    r"eligib|requirement|deadline|entry.requirement|english.language|\bfees\b|"
+    r"phd|dphil|graduate",
+    re.I,
+)
+COOKIE_BUTTON_RE = re.compile(
+    r"^(accept( all( cookies)?)?|agree|i agree|allow all|got it|ok|continue)$",
+    re.I,
+)
+
+
+def readable_html_text(html: str) -> str:
+    soup = BeautifulSoup(html or "", "html.parser")
+    for node in soup(["script", "style", "noscript", "svg", "iframe"]):
+        node.decompose()
+    main = (soup.find("main") or soup.find("article") or soup.find(attrs={"role": "main"})
+            or soup.body or soup)
+    return main.get_text("\n", strip=True)
+
+
+def related_programme_urls(html: str, base_url: str, *, limit: int = 4) -> list[str]:
+    soup = BeautifulSoup(html or "", "html.parser")
+    parsed_base = urlparse(base_url)
+    found: list[str] = []
+    seen = {canonical.casefold() for canonical in (base_url, base_url.rstrip("/"))}
+    for anchor in soup.select("a[href]"):
+        href = urljoin(base_url, anchor.get("href") or "")
+        parsed = urlparse(href)
+        if parsed.scheme not in {"http", "https"}:
+            continue
+        if (parsed.hostname or "").casefold() != (parsed_base.hostname or "").casefold():
+            continue
+        haystack = f"{parsed.path} {anchor.get_text(' ', strip=True)}"
+        if not RELATED_PAGE_RE.search(haystack):
+            continue
+        clean = href.split("#", 1)[0]
+        if not clean or clean.casefold() in seen:
+            continue
+        seen.add(clean.casefold())
+        found.append(clean)
+        if len(found) >= limit:
+            break
+    return found
+
+
 def build_field_locator(*, tag: str, element_id: str | None, name: str | None,
                         aria_label: str | None, tag_index: int,
-                        accessible_label: str | None = None) -> str:
+                        accessible_label: str | None = None,
+                        placeholder: str | None = None) -> str:
     if element_id:
         return f"#{_css_escape(element_id)}"
+    if name:
+        return f"{tag}[name='{_css_escape(name)}']"
     label = (accessible_label or "").strip()
     if label and not _normalized_label(label).startswith("field"):
         return f"get-by-label:{label}"
-    if name:
-        return f"{tag}[name='{_css_escape(name)}']"
     if aria_label:
         return f"{tag}[aria-label='{_css_escape(aria_label)}']"
+    if placeholder:
+        return f"{tag}[placeholder='{_css_escape(placeholder)}']"
     return f"xpath=(//{tag})[{max(1, tag_index)}]"
 
 
 def playwright_locator(page, locator: str):
     if locator.startswith("get-by-label:"):
-        return page.get_by_label(locator.split(":", 1)[1], exact=False)
+        return page.get_by_label(locator.split(":", 1)[1], exact=True)
     return page.locator(locator)
 
 
@@ -67,9 +116,33 @@ def _wrapping_label_text(node) -> str:
 
 def labels_match(expected: str, actual: str) -> bool:
     left, right = _normalized_label(expected), _normalized_label(actual)
-    if not left or left.startswith("field "):
-        return True
-    return bool(right) and (left in right or right in left)
+    return bool(left and right) and left == right
+
+
+def unique_matching_index(expected: str, candidates: Sequence[Sequence[str]]) -> int | None:
+    """Index of the only candidate with one exact normalized identity match."""
+    hits = [index for index, identities in enumerate(candidates)
+            if any(labels_match(expected, identity) for identity in identities)]
+    if len(hits) != 1:
+        return None
+    return hits[0]
+
+
+def _live_identities(locator) -> list[str]:
+    values = []
+    label_text = locator.evaluate(
+        "el => { const id = el.id; if (id) { const node = document.querySelector(`label[for='${CSS.escape(id)}']`);"
+        " if (node) return node.innerText; } const wrap = el.closest('label'); return wrap ? wrap.innerText : ''; }") or ""
+    for value in (
+        label_text,
+        locator.get_attribute("aria-label"),
+        locator.get_attribute("name"),
+        locator.get_attribute("placeholder"),
+    ):
+        text = str(value or "").strip()
+        if text:
+            values.append(text)
+    return values
 
 
 SENSITIVE_KEYS = {"PASSWORD", "MFA_CODE", "PAYMENT", "PASSPORT", "GOVERNMENT_ID"}
@@ -140,21 +213,97 @@ class LocalPlaywrightWorker:
             raise RuntimeError("Install Playwright in the local companion environment to use browser acquisition") from error
         return sync_playwright
 
+    def _settle(self, page) -> None:
+        try:
+            page.wait_for_load_state("networkidle", timeout=8000)
+        except Exception:
+            pass
+        try:
+            page.wait_for_timeout(350)
+        except Exception:
+            pass
+
+    def _dismiss_overlays(self, page) -> None:
+        try:
+            button = page.get_by_role("button", name=COOKIE_BUTTON_RE)
+            if button.count():
+                button.first.click(timeout=1500)
+                page.wait_for_timeout(250)
+                return
+        except Exception:
+            pass
+        for selector in (
+            'button:has-text("Accept all")',
+            'button:has-text("Accept cookies")',
+            'button:has-text("Accept")',
+            '[id*="cookie"] button',
+        ):
+            try:
+                loc = page.locator(selector)
+                if loc.count():
+                    loc.first.click(timeout=1200)
+                    return
+            except Exception:
+                continue
+
+    def _scroll(self, page) -> None:
+        try:
+            page.evaluate("""async () => {
+                const height = document.body ? document.body.scrollHeight : 0;
+                const step = Math.max(480, Math.floor(window.innerHeight * 0.85));
+                for (let y = 0; y < height; y += step) {
+                    window.scrollTo(0, y);
+                    await new Promise(resolve => setTimeout(resolve, 70));
+                }
+                window.scrollTo(0, 0);
+            }""")
+        except Exception:
+            pass
+
+    def _visible_text(self, page) -> str:
+        try:
+            main = page.locator("main, article, [role='main']").first
+            if main.count():
+                text = main.inner_text(timeout=2500)
+                if text and len(text.strip()) > 80:
+                    return text
+        except Exception:
+            pass
+        return page.locator("body").inner_text()
+
     def acquire(self, url: str) -> AcquisitionResult:
         _validate_web_url(url)
         sync_playwright = self._playwright()
         with sync_playwright() as api:
-            browser = api.chromium.launch(headless=False)
+            browser = api.chromium.launch(headless=True)
             page = browser.new_page()
-            page.goto(url, wait_until="domcontentloaded")
-            text = page.locator("body").inner_text()
+            page.goto(url, wait_until="load", timeout=25000)
+            self._settle(page)
+            self._dismiss_overlays(page)
+            self._scroll(page)
             html = page.content()
+            text = self._visible_text(page)
             if any(signal in text.casefold() for signal in self.BLOCK_SIGNALS):
                 browser.close()
                 return AcquisitionResult(url, "HUMAN_INPUT_REQUIRED", method="PLAYWRIGHT",
                     human_action="Complete the CAPTCHA or access check in the local browser, then retry acquisition.")
+            final_url = page.url or url
+            for related in related_programme_urls(html, final_url, limit=3):
+                try:
+                    _validate_web_url(related)
+                    if (urlparse(related).hostname or "").casefold() != (urlparse(final_url).hostname or "").casefold():
+                        continue
+                    page.goto(related, wait_until="load", timeout=20000)
+                    self._settle(page)
+                    extra_text = self._visible_text(page)
+                    extra_html = page.content()
+                    if extra_text.strip():
+                        text = f"{text}\n\n## {related}\n{extra_text}"
+                        html = f"{html}\n<!-- related:{related} -->\n{extra_html}"
+                except Exception:
+                    continue
             browser.close()
-            return AcquisitionResult(url, "ACQUIRED", text=text, html=html)
+            return AcquisitionResult(final_url, "ACQUIRED", text=text[:200000], html=html[:400000])
 
     def inspect_fields(self, url: str) -> Sequence[BrowserField]:
         _validate_web_url(url)
@@ -163,7 +312,9 @@ class LocalPlaywrightWorker:
         with sync_playwright() as api:
             browser = api.chromium.launch(headless=False)
             page = browser.new_page()
-            page.goto(url, wait_until="domcontentloaded")
+            page.goto(url, wait_until="load", timeout=25000)
+            self._settle(page)
+            self._dismiss_overlays(page)
             tag_counts: dict[str, int] = {}
             for index, node in enumerate(page.locator("input, textarea, select").all()):
                 tag_name = node.evaluate("el => el.tagName.toLowerCase()")
@@ -173,16 +324,18 @@ class LocalPlaywrightWorker:
                 node_id = node.get_attribute("id")
                 name = node.get_attribute("name")
                 aria = node.get_attribute("aria-label")
-                label = ""
+                placeholder = node.get_attribute("placeholder")
+                associated = ""
                 if node_id and page.locator(f"label[for='{node_id}']").count():
-                    label = page.locator(f"label[for='{node_id}']").first.inner_text()
-                if not label:
-                    wrapping = node.evaluate("el => el.closest('label') && el.closest('label').innerText")
-                    label = wrapping or aria or name or f"Field {index + 1}"
+                    associated = page.locator(f"label[for='{node_id}']").first.inner_text()
+                wrapping = node.evaluate("el => el.closest('label') && el.closest('label').innerText") or ""
+                accessible = str(associated or wrapping or aria or "").strip()
+                label = accessible or name or placeholder or f"Field {index + 1}"
                 tag_counts[tag_name] = tag_counts.get(tag_name, 0) + 1
                 locator = build_field_locator(
                     tag=tag_name, element_id=node_id, name=name, aria_label=aria,
-                    tag_index=tag_counts[tag_name], accessible_label=str(label).strip())
+                    tag_index=tag_counts[tag_name], accessible_label=accessible or None,
+                    placeholder=placeholder)
                 fields.append(BrowserField(locator, str(label).strip(), input_type,
                                            node.get_attribute("required") is not None))
             browser.close()
@@ -211,14 +364,17 @@ def fields_from_html(html: str) -> list[BrowserField]:
         node_id = node.get("id")
         name = node.get("name")
         aria = node.get("aria-label")
+        placeholder = node.get("placeholder")
         label_node = soup.select_one(f"label[for='{node_id}']") if node_id else None
+        associated = label_node.get_text(" ", strip=True) if label_node else ""
         wrapping_label = _wrapping_label_text(node)
-        label = (label_node.get_text(" ", strip=True) if label_node else
-                 wrapping_label or aria or name or node.get("placeholder") or f"Field {index + 1}")
+        accessible = associated or wrapping_label or (aria or "")
+        label = accessible or name or placeholder or f"Field {index + 1}"
         tag_counts[node.name] = tag_counts.get(node.name, 0) + 1
         locator = build_field_locator(
             tag=node.name, element_id=node_id, name=name, aria_label=aria,
-            tag_index=tag_counts[node.name], accessible_label=label)
+            tag_index=tag_counts[node.name], accessible_label=accessible or None,
+            placeholder=placeholder)
         fields.append(BrowserField(locator, label, input_type, node.has_attr("required")))
     return fields
 
@@ -350,21 +506,13 @@ def execute_approved_plan(db_path: Path | str, plan_id: int, *,
             print("Human action required: complete the access check in the browser, then press Enter here.")
             input()
         for item in safe_items:
-            locator = playwright_locator(page, item.locator).first
-            if not locator.count():
-                print(f"Skipped missing field: {item.label}")
+            targets = playwright_locator(page, item.locator)
+            identities = [_live_identities(targets.nth(index)) for index in range(targets.count())]
+            chosen = unique_matching_index(item.label, identities)
+            if chosen is None:
+                print(f"Skipped ambiguous or non-matching field: {item.label}")
                 continue
-            current_label = (
-                locator.get_attribute("aria-label")
-                or locator.get_attribute("name")
-                or locator.evaluate(
-                    "el => { const id = el.id; if (id) { const node = document.querySelector(`label[for='${id}']`); if (node) return node.innerText; } const wrap = el.closest('label'); return wrap ? wrap.innerText : ''; }")
-                or ""
-            )
-            if not labels_match(item.label, current_label):
-                print(f"Skipped label mismatch for {item.label}: found {current_label!r}")
-                continue
-            locator.fill(item.value or "")
+            targets.nth(chosen).fill(item.value or "")
             filled += 1
         print(f"Filled {filled} approved safe fields. Review every value in the browser.")
         print("Submission, declarations, MFA, payment, file choosers, and sensitive fields remain manual.")
