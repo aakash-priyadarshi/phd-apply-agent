@@ -492,7 +492,7 @@ def test_migration_contains_intent_context_and_browser_tables(tmp_path):
     with connect(path) as db:
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         version = db.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-    assert version == 11
+    assert version == 12
     assert {"applicant_research_contexts", "context_retrievals", "programme_candidates",
             "browser_fill_plans", "workload_events", "profile_build_operations",
             "university_rankings", "university_aliases"} <= tables
