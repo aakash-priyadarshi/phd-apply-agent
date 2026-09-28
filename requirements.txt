@@ -1,7 +1,7 @@
 streamlit[auth]==1.64.0
 Authlib==1.8.0
 pandas==3.0.6
-openai==3.16.2
+openai==3.19.2
 requests==2.34.2
 beautifulsoup4==4.15.0
 google-auth==2.58.0
